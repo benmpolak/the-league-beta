@@ -418,7 +418,9 @@ const winChance = (sa, sb) => 1 / (1 + Math.pow(10, -(sa - sb) / 25));
 const PLAYER_SD = 4; // one player's gameweek points spread
 function playerFixtureState(p, gwN) {
   const f = state.fixtures.find(f => f.gw === gwN && (f.home === p.team || f.away === p.team));
-  if (!f) return { st: 'none', frac: 0 };
+  // no fixture DATA at all for this GW (failed fetch, not yet synced): assume everyone is
+  // still to play rather than letting the win bar collapse to a false 100–0
+  if (!f) return { st: 'none', frac: state.fixtures.some(x => x.gw === gwN) ? 0 : 1 };
   if (f.finished) return { st: 'done', frac: 0 };
   if (f.started) return { st: 'live', frac: Math.max(0, (90 - Math.min(90, f.minutes || 0)) / 90) };
   return { st: 'pre', frac: 1 };
@@ -446,7 +448,10 @@ function liveWinProb(a, b, i) {
   const t = 1 / (1 + 0.2316419 * Math.abs(z));
   const d = 0.3989423 * Math.exp(-z * z / 2);
   let p = d * t * (0.3194815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-  return z > 0 ? 1 - p : p;
+  p = z > 0 ? 1 - p : p;
+  // never claim certainty while either side still has football to play
+  if (A.toPlay + B.toPlay > 0) p = Math.min(0.99, Math.max(0.01, p));
+  return p;
 }
 // injury/availability chip from the FPL status flag
 const STATUS_ICON = { d: '⚠️', i: '🏥', s: '🟥', u: '🚫', n: '🚫' };
