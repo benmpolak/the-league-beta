@@ -323,3 +323,10 @@ input:focus, select:focus { border-color: var(--accent-dim); }
 .preview-note { font-size: 12px; color: var(--muted); text-align: center; margin-top: 3px; }
 .plink { cursor: pointer; }
 .plink:hover { text-decoration: underline; text-underline-offset: 2px; }
+.pitch { background: linear-gradient(180deg, #14532daa, #166534aa), repeating-linear-gradient(180deg, #ffffff08 0 40px, transparent 40px 80px); border: 1px solid var(--line); border-radius: 14px; padding: 16px 8px; display: flex; flex-direction: column; gap: 14px; }
+.pitch-row { display: flex; justify-content: space-evenly; gap: 6px; flex-wrap: wrap; }
+.pitch-chip { display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; padding: 6px 8px; border-radius: 10px; border: 1px solid transparent; min-width: 64px; }
+.pitch-chip:hover { background: #ffffff14; }
+.pitch-chip.sel { border-color: var(--accent); background: #ffffff1c; }
+.pitch-chip .kit { width: 30px; height: 38px; }
+.pitch-name { font-size: 10.5px; font-weight: 700; text-shadow: 0 1px 2px #000a; text-align: center; }

@@ -1657,7 +1657,7 @@ function viewDraftRecap() {
 }
 
 /* ----- my team (lineups + transfers) ----- */
-let teamView = { mid: null, gw: null, transferOut: null };
+let teamView = { mid: null, gw: null, transferOut: null, pitchSel: null };
 
 function viewTeam() {
   if (teamView.mid == null) teamView.mid = state.managers[0].id;
@@ -1704,6 +1704,19 @@ function viewTeam() {
             <span class="xi-chip">${starting ? 'XI' : 'bench'}</span>
           </div>`;
         }).join('')}`).join('')}
+    </div>
+    <div class="card">
+      <h2>The pitch <span class="muted" style="font-weight:400;font-size:12px">tap two players in a line to swap them — left back goes left</span></h2>
+      <div class="pitch">
+        ${['GK', 'DF', 'MF', 'FW'].map(pos => `
+          <div class="pitch-row">
+            ${xi.map(pid => PLAYER_BY_ID[pid]).filter(p => p.pos === pos).map(p => `
+              <div class="pitch-chip ${teamView.pitchSel === p.id ? 'sel' : ''}" data-pitch="${p.id}">
+                ${kitImg(p.team, p.pos === 'GK')}
+                <span class="pitch-name">${esc(p.name)}</span>
+              </div>`).join('') || '<span class="muted" style="font-size:11px">—</span>'}
+          </div>`).join('')}
+      </div>
     </div>
     <div class="draft-side">
       <div class="card">
@@ -1796,6 +1809,23 @@ function bindTeam() {
       save(); render();
     });
   }
+  // --- the pitch: arrange a line left-to-right by swapping two players ---
+  document.querySelectorAll('[data-pitch]').forEach(chip => chip.onclick = () => {
+    if (!demoMode && gwHasStarted(gw)) { toast('Lineup is locked for this gameweek'); return; }
+    if (!canActFor(mid)) { toast(`That's ${managerName(mid)}'s pitch, not yours`); return; }
+    const pid = +chip.dataset.pitch;
+    if (teamView.pitchSel == null) { teamView.pitchSel = pid; render(); return; }
+    if (teamView.pitchSel === pid) { teamView.pitchSel = null; render(); return; }
+    const a = PLAYER_BY_ID[teamView.pitchSel], b = PLAYER_BY_ID[pid];
+    if (a.pos !== b.pos) { toast(`Same line only — ${a.name} is a ${a.pos}, ${b.name} is a ${b.pos}`); teamView.pitchSel = pid; render(); return; }
+    const xi2 = [...lineupFor(mid, gw)];
+    const ia = xi2.indexOf(a.id), ib = xi2.indexOf(b.id);
+    [xi2[ia], xi2[ib]] = [xi2[ib], xi2[ia]];
+    (state.lineups[mid] = state.lineups[mid] || {})[gw] = xi2;
+    pushShared(`lineups/${mid}/${gw}`, xi2);
+    teamView.pitchSel = null;
+    save(); render();
+  });
   // --- custom squad numbers ---
   document.querySelectorAll('[data-num]').forEach(el => el.onclick = e => {
     e.stopPropagation();
@@ -2199,6 +2229,43 @@ function viewTable() {
         <p class="muted" style="font-size:11px;margin-top:8px">Points shown are what each player banked while in the starting XI.</p>
       </div>`;
     }).join('')}
+    <div class="card toplist" style="margin-top:24px">
+      <h2>Trough activity <span class="muted" style="font-weight:400;font-size:12px">who can't leave it alone</span></h2>
+      ${(() => {
+        const rows = state.managers.map(m => {
+          const mine = state.transfers.filter(t => t.managerId === m.id);
+          return {
+            id: m.id,
+            signs: mine.filter(t => !t.trade && !t.waiver).length,
+            claims: mine.filter(t => t.waiver).length,
+            trades: mine.filter(t => t.trade).length,
+            total: mine.length,
+          };
+        }).sort((a, b) => b.total - a.total);
+        const max = rows[0]?.total || 0;
+        return `<table class="pool-table">
+          <thead><tr><th>Manager</th><th class="num">Trough signings</th><th class="num">Waiver claims won</th><th class="num">Trades</th><th class="num">Total moves</th></tr></thead>
+          <tbody>${rows.map((r, i) => `<tr>
+            <td><b>${esc(teamName(r.id))}</b> <span class="muted" style="font-size:11px">${esc(managerName(r.id))}</span>
+              ${max > 0 && i === 0 ? '<span class="tag">&#128055; lives at the Trough</span>' : ''}
+              ${max > 0 && i === rows.length - 1 && r.total === 0 ? '<span class="tag">hasn\'t touched his team</span>' : ''}</td>
+            <td class="num">${r.signs}</td><td class="num">${r.claims}</td><td class="num">${r.trades}</td>
+            <td class="num gold">${r.total}</td>
+          </tr>`).join('')}</tbody>
+        </table>`;
+      })()}
+      ${(() => {
+        const counts = {};
+        for (const t of state.transfers) {
+          if (t.trade) continue; // trades aren't the Trough
+          for (const pid of [t.inId, t.outId]) counts[pid] = (counts[pid] || 0) + 1;
+        }
+        const hot = Object.entries(counts).map(([pid, n]) => ({ p: PLAYER_BY_ID[pid], n }))
+          .filter(x => x.p && x.n >= 2).sort((a, b) => b.n - a.n).slice(0, 8);
+        return hot.length ? `<h3 style="margin-top:16px">Hot potatoes &#129364; <span class="muted" style="font-weight:400;font-size:11.5px">most passed through the Trough</span></h3>
+          ${hot.map(({ p, n }) => `<div class="squad-row"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${photoImg(p)}<span>${pname(p)}</span><span class="muted" style="margin-left:8px;font-size:11.5px">${esc(p.club)}</span><span class="sp-pts">${n} moves</span></div>`).join('')}` : '';
+      })()}
+    </div>
     <div class="card toplist" style="margin-top:24px">
       <h2>Top players (all drafted &amp; signed)</h2>
       ${allDrafted.map(({ p, pts }) => `
