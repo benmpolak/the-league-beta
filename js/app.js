@@ -662,7 +662,13 @@ function waiverOrder(gwIdx) {
   return [...base].reverse(); // bottom feeds first
 }
 /* ---------------- trades (Draft Fantasy style: propose, accept, done) ---------------- */
+// trades carry give/get as ARRAYS (equal counts). Old single-id offers still parse.
+const tGive = t => toArr(t.give ?? []).length ? toArr(t.give) : [t.give].filter(Boolean);
+const tGet = t => toArr(t.get ?? []).length ? toArr(t.get) : [t.get].filter(Boolean);
+const tradeNames = ids => ids.map(id => PLAYER_BY_ID[id]?.name || '?').join(' + ');
 function proposeTrade(from, to, give, get, terms = '') {
+  give = toArr(give); get = toArr(get);
+  if (!give.length || give.length !== get.length) { toast('Trades swap the same number of players each way'); return; }
   state.trades = [...toArr(state.trades), { id: Date.now() + '-' + from, from, to, give, get, terms: terms.slice(0, 200), status: 'pending', t: Date.now() }];
   pushShared('trades', state.trades);
   save(); render();
@@ -679,17 +685,20 @@ function respondTrade(id, accept) {
     return;
   }
   const cur = currentGwIndex();
-  const pa = PLAYER_BY_ID[tr.give], pb = PLAYER_BY_ID[tr.get];
+  const give = tGive(tr), get = tGet(tr);
   // validate at acceptance time — squads may have changed since the proposal
-  if (!managerSquad(tr.from).some(x => x.id === tr.give) || !managerSquad(tr.to).some(x => x.id === tr.get)) {
+  if (give.some(pid => !managerSquad(tr.from).some(x => x.id === pid)) ||
+      get.some(pid => !managerSquad(tr.to).some(x => x.id === pid))) {
     tr.status = 'withdrawn';
     pushShared('trades', state.trades);
     save(); render();
     toast('Trade void — a player involved has already moved on.');
     return;
   }
-  if (!squadShapeOk([...squadAt(tr.from, cur).filter(p => p.id !== tr.give), pb]) ||
-      !squadShapeOk([...squadAt(tr.to, cur).filter(p => p.id !== tr.get), pa])) {
+  const giveSet = new Set(give), getSet = new Set(get);
+  const fromAfter = [...squadAt(tr.from, cur).filter(p => !giveSet.has(p.id)), ...get.map(pid => PLAYER_BY_ID[pid])];
+  const toAfter = [...squadAt(tr.to, cur).filter(p => !getSet.has(p.id)), ...give.map(pid => PLAYER_BY_ID[pid])];
+  if (!squadShapeOk(fromAfter) || !squadShapeOk(toAfter)) {
     toast('Trade would break a squad\'s position limits'); return;
   }
   tr.status = 'done';
@@ -697,19 +706,21 @@ function respondTrade(id, accept) {
     state.covenants = [...toArr(state.covenants), { id: tr.id + '-cov', from: tr.from, to: tr.to, text: tr.terms, t: Date.now(), gw: GAMEWEEKS[cur].n }];
     pushShared('covenants', state.covenants);
   }
-  state.transfers.push({ managerId: tr.from, outId: tr.give, inId: tr.get, gw: cur, n: state.transfers.length + 1, t: Date.now(), trade: true });
-  state.transfers.push({ managerId: tr.to, outId: tr.get, inId: tr.give, gw: cur, n: state.transfers.length + 1, t: Date.now(), trade: true });
-  for (const [m2, gone] of [[tr.from, tr.give], [tr.to, tr.get]]) {
+  for (let k = 0; k < give.length; k++) {
+    state.transfers.push({ managerId: tr.from, outId: give[k], inId: get[k], gw: cur, n: state.transfers.length + 1, t: Date.now(), trade: true });
+    state.transfers.push({ managerId: tr.to, outId: get[k], inId: give[k], gw: cur, n: state.transfers.length + 1, t: Date.now(), trade: true });
+  }
+  for (const [m2, gone] of [[tr.from, give], [tr.to, get]]) {
     const lu = state.lineups[m2]?.[cur];
     if (lu) {
-      state.lineups[m2][cur] = lu.filter(pid => pid !== gone);
+      state.lineups[m2][cur] = lu.filter(pid => !gone.includes(pid));
       pushShared(`lineups/${m2}/${cur}`, state.lineups[m2][cur]);
     }
   }
   pushShared('trades', state.trades);
   pushShared('transfers', state.transfers);
   save(); render();
-  toast(`Trade done: ${pa.name} ↔ ${pb.name}. Executed instantly, as is right and proper.`);
+  toast(`Trade done: ${tradeNames(give)} ↔ ${tradeNames(get)}. Executed instantly, as is right and proper.`);
 }
 
 /* ---------------- draft logic ---------------- */
@@ -2382,7 +2393,7 @@ function viewTransfers() {
       <p class="muted" style="font-size:12px;margin-bottom:10px">Propose a swap; it executes the instant the other manager accepts.</p>
       ${toArr(state.trades).filter(t => t.status === 'pending' && (t.to === mid || t.from === mid)).map(t => `
         <div class="lrow" style="font-size:12.5px;flex-wrap:wrap">
-          <span><b>${esc(managerName(t.from))}</b> gives <b>${pname(PLAYER_BY_ID[t.give])}</b> for <b>${pname(PLAYER_BY_ID[t.get])}</b>${t.terms ? `<br><span class="muted" style="font-size:11px">&#128220; ${esc(t.terms)}</span>` : ''}</span>
+          <span><b>${esc(managerName(t.from))}</b> gives <b>${esc(tradeNames(tGive(t)))}</b> for <b>${esc(tradeNames(tGet(t)))}</b>${t.terms ? `<br><span class="muted" style="font-size:11px">&#128220; ${esc(t.terms)}</span>` : ''}</span>
           <span style="margin-left:auto;display:flex;gap:4px">
             ${t.to === mid ? `<button class="btn small" data-tracc="${t.id}">Accept</button><button class="btn ghost small" data-trrej="${t.id}">Reject</button>`
               : `<button class="btn ghost small" data-trwd="${t.id}">Withdraw</button>`}
@@ -2638,8 +2649,8 @@ function bindTransfers() {
     tradeWith.value = tf.other;
     setTimeout(() => {
       tradeWith.onchange();
-      const sel = $('#tradeTheirs');
-      if (sel) sel.value = tf.get;
+      const cb = pickers.querySelector(`[data-trside="theirs"][value="${tf.get}"]`);
+      if (cb) cb.checked = true;
     }, 0);
   }
   if (tradeWith) {
@@ -2649,29 +2660,34 @@ function bindTransfers() {
       const cur = currentGwIndex();
       const mine = squadAt(mid, cur).sort((a, b) => POS_ORDER[a.pos] - POS_ORDER[b.pos]);
       const theirs = squadAt(other, cur).sort((a, b) => POS_ORDER[a.pos] - POS_ORDER[b.pos]);
+      const col = (title, list, side) => `<div style="flex:1;min-width:190px">
+        <p style="font-size:12px;font-weight:700;margin-bottom:4px">${title}</p>
+        <div style="max-height:220px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:6px">
+        ${list.map(p => `<label style="display:flex;gap:6px;align-items:center;font-size:12px;padding:2px 0;cursor:pointer">
+          <input type="checkbox" data-trside="${side}" value="${p.id}"><span class="pos-badge pos-${p.pos}">${p.pos}</span> ${esc(p.name)} <span class="muted">${esc(p.club)}</span>
+        </label>`).join('')}
+        </div></div>`;
       pickers.innerHTML = `
-        <select id="tradeMine" style="width:100%;margin-bottom:8px">
-          <option value="">${esc(managerName(mid))} gives…</option>
-          ${mine.map(p => `<option value="${p.id}">${p.pos} — ${esc(p.name)} (${esc(p.club)})</option>`).join('')}
-        </select>
-        <select id="tradeTheirs" style="width:100%;margin-bottom:8px">
-          <option value="">${esc(managerName(other))} gives…</option>
-          ${theirs.map(p => `<option value="${p.id}">${p.pos} — ${esc(p.name)} (${esc(p.club)})</option>`).join('')}
-        </select>
+        <p class="muted" style="font-size:11.5px;margin-bottom:6px">Tick any number of players — the same count on each side (2-for-2, 3-for-3…).</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+          ${col(`${esc(managerName(mid))} gives`, mine, 'mine')}
+          ${col(`${esc(managerName(other))} gives`, theirs, 'theirs')}
+        </div>
         <input type="text" id="tradeTerms" maxlength="200" placeholder="Side terms (optional) — loan-backs, first refusals, the nonsense…" style="width:100%;margin-bottom:8px">
         <button class="btn small" id="tradeGo">Propose trade</button>`;
       const tradeGo = pickers.querySelector('#tradeGo');
       if (!tradeGo) return;
       tradeGo.onclick = () => {
         if (!actGuard(mid, 'trade')) return;
-        const a = +$('#tradeMine').value, b = +$('#tradeTheirs').value;
-        if (!a || !b) { toast('Pick a player from each side'); return; }
-        const pa = PLAYER_BY_ID[a], pb = PLAYER_BY_ID[b];
-        if (!squadShapeOk([...squadAt(mid, cur).filter(p => p.id !== a), pb]) ||
-            !squadShapeOk([...squadAt(other, cur).filter(p => p.id !== b), pa])) {
-          toast('Trade would break a squad\'s position limits'); return;
-        }
-        proposeTrade(mid, other, a, b, $('#tradeTerms')?.value.trim() || '');
+        const give = [...pickers.querySelectorAll('[data-trside="mine"]:checked')].map(x => +x.value);
+        const get = [...pickers.querySelectorAll('[data-trside="theirs"]:checked')].map(x => +x.value);
+        if (!give.length || !get.length) { toast('Pick at least one player on each side'); return; }
+        if (give.length !== get.length) { toast(`Same number each way — you've ticked ${give.length} for ${get.length}`); return; }
+        const giveSet = new Set(give), getSet = new Set(get);
+        const meAfter = [...squadAt(mid, cur).filter(p => !giveSet.has(p.id)), ...get.map(pid => PLAYER_BY_ID[pid])];
+        const themAfter = [...squadAt(other, cur).filter(p => !getSet.has(p.id)), ...give.map(pid => PLAYER_BY_ID[pid])];
+        if (!squadShapeOk(meAfter) || !squadShapeOk(themAfter)) { toast('That combination breaks a squad’s position limits'); return; }
+        proposeTrade(mid, other, give, get, $('#tradeTerms').value.trim());
       };
     };
   }
@@ -2717,7 +2733,7 @@ function viewDash() {
     <div class="card">
       <h2>Needs your attention</h2>
       ${flags.length ? `<h3>Squad flags</h3>${flags.map(p => `<div class="lrow" style="font-size:12.5px">${statusChip(p)} ${pname(p)} <span class="muted" style="font-size:11px">${esc(p.news || 'unavailable')}</span></div>`).join('')}` : '<p class="muted" style="font-size:12.5px">Squad fully fit. Enjoy it while it lasts.</p>'}
-      ${offersIn.length ? `<h3 style="margin-top:12px">Trade offers in</h3>${offersIn.map(t => `<div class="lrow" style="font-size:12.5px"><b>${esc(managerName(t.from))}</b> offers ${pname(PLAYER_BY_ID[t.get])} for ${pname(PLAYER_BY_ID[t.give])}</div>`).join('')}<button class="btn small" data-goto="transfers" style="margin-top:6px">Respond</button>` : ''}
+      ${offersIn.length ? `<h3 style="margin-top:12px">Trade offers in</h3>${offersIn.map(t => `<div class="lrow" style="font-size:12.5px"><b>${esc(managerName(t.from))}</b> offers <b>${esc(tradeNames(tGive(t)))}</b> for ${esc(tradeNames(tGet(t)))}</div>`).join('')}<button class="btn small" data-goto="transfers" style="margin-top:6px">Respond</button>` : ''}
       <h3 style="margin-top:12px">Waivers</h3>
       <p class="muted" style="font-size:12.5px">${myCl.length ? `${myCl.length} claim${myCl.length > 1 ? 's' : ''} lodged.` : 'No claims lodged.'} ${waiverControl() === 'auto' ? `Next run: ${nextWaiverRun(Math.max(lastWaiverRun(), Date.now())).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })} UTC.` : waiverControl() === 'open' ? 'The Trough is thrown open.' : 'The Trough is closed.'}</p>
     </div>

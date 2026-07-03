@@ -209,19 +209,18 @@ const check = (label, ok, detail = '') => {
     document.querySelector('#tradeWith').value = other;
     document.querySelector('#tradeWith').dispatchEvent(new Event('change'));
     await new Promise(r => setTimeout(r, 120));
-    const mine = document.querySelector('#tradeMine'), theirs = document.querySelector('#tradeTheirs');
-    let pair = null;
-    for (const mo of [...mine.options].slice(1)) {
-      const mp = PLAYER_BY_ID[+mo.value];
-      for (const to of [...theirs.options].slice(1)) {
-        const tp = PLAYER_BY_ID[+to.value];
-        if (tp.pos !== mp.pos) continue;
-        pair = [+mo.value, +to.value]; break;
-      }
-      if (pair) break;
+    // a 2-for-2: pair up two positions present on both sides so shapes hold
+    const mineCbs = [...document.querySelectorAll('[data-trside="mine"]')];
+    const theirCbs = [...document.querySelectorAll('[data-trside="theirs"]')];
+    const byPos = cbs => { const m = {}; for (const c of cbs) { const pos = PLAYER_BY_ID[+c.value].pos; (m[pos] = m[pos] || []).push(c); } return m; };
+    const mp = byPos(mineCbs), tp = byPos(theirCbs);
+    const posPair = ['MF', 'DF', 'FW'].filter(pos => mp[pos]?.length && tp[pos]?.length).slice(0, 2);
+    if (posPair.length < 2) return { skip: true };
+    const give = [], get = [];
+    for (const pos of posPair) {
+      mp[pos][0].checked = true; give.push(+mp[pos][0].value);
+      tp[pos][0].checked = true; get.push(+tp[pos][0].value);
     }
-    if (!pair) return { skip: true };
-    mine.value = pair[0]; theirs.value = pair[1];
     document.querySelector('#tradeGo').click();
     await new Promise(r => setTimeout(r, 150));
     // counterparty accepts
@@ -233,12 +232,15 @@ const check = (label, ok, detail = '') => {
     await new Promise(r => setTimeout(r, 150));
     whoami = state.managers[0].id;
     return {
-      aHasB: squadAt(mid, cur).some(x => x.id === pair[1]),
-      bHasA: squadAt(other, cur).some(x => x.id === pair[0]),
+      twoForTwo: give.length === 2,
+      aHasBoth: get.every(pid => squadAt(mid, cur).some(x => x.id === pid)),
+      bHasBoth: give.every(pid => squadAt(other, cur).some(x => x.id === pid)),
+      sizes: [squadAt(mid, cur).length, squadAt(other, cur).length],
       legal: squadShapeOk(squadAt(mid, cur)) && squadShapeOk(squadAt(other, cur)),
     };
   });
-  check('trade proposed + accepted via UI swaps both squads', tradeOk.skip || (tradeOk.aHasB && tradeOk.bHasA && tradeOk.legal), JSON.stringify(tradeOk));
+  check('2-for-2 trade via UI swaps both squads, sizes hold',
+    tradeOk.skip || (tradeOk.twoForTwo && tradeOk.aHasBoth && tradeOk.bHasBoth && tradeOk.legal && tradeOk.sizes.every(s => s === 14)), JSON.stringify(tradeOk));
 
   // ---------- 5. the Window Draft ----------
   const wd = await p.evaluate(async () => {
