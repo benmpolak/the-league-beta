@@ -3303,7 +3303,7 @@ const HONOURS_BOARD = [
   ['2015–16', 'Toby Levy', '*'], ['2016–17', 'Marc Conway', '*'], ['2017–18', 'Ian Tussie', '*'],
   ['2018–19', 'Marc Conway', '**'], ['2019–20', 'Ben Polak', '*'], ['2020–21', 'Alex Singer', '*'],
   ['2021–22', 'Alex Singer', '**'], ['2022–23', 'Alex Duckett', '*'], ['2023–24', 'Ian Tussie', '**'],
-  ['2024–25', 'Richard Blank', '*'], ['2025–26', 'TBC', ''],
+  ['2024–25', 'Richard Blank', '*'], ['2025–26', 'Adam Jackson', '*'],
 ];
 function viewRules() {
   const sc = state.settings.scoring;
@@ -3316,7 +3316,7 @@ function viewRules() {
       <p class="rules-p">Squads of <b>${state.settings.squadSize}</b>, flexible make-up: ${['GK', 'DF', 'MF', 'FW'].map(p => `${posMin[p]}–${posMax[p]} ${p}`).join(', ')}. <b>No club cap.</b> Tussie may draft the entire City team by GW30. That is his right.</p>
       <p class="rules-p"><b>Starting XI:</b> pick 11 from your ${state.settings.squadSize} each gameweek — 1 GK, 3–5 DF, 2–5 MF, 1–3 FW. <b>Only starters score.</b> Lineups lock at the FPL deadline.</p>
       <p class="rules-p"><b>Forgot to set it?</b> Last week's XI carries over (or a best XI is auto-picked). Nobody scores nil for being on holiday.</p>
-      <p class="rules-p"><b>Auto-subs:</b> if a starter doesn't play at all that gameweek, your best bench player who did play comes in automatically.</p>
+      <p class="rules-p"><b>Auto-subs:</b> if a starter doesn't play at all that gameweek, your bench comes in automatically <b>in the order you've set</b> — leftmost first (tap two bench players on the pitch view to reorder).</p>
       <h3>The season</h3>
       <p class="rules-p"><b>GW1–33</b>: regular season, head-to-head every week — everyone plays everyone, nearly three times over. Win 3, draw 1, loss 0.</p>
       <p class="rules-p"><b>GW34</b>: playoff semi-finals, one leg — 1st v 4th, 2nd v 3rd.</p>
