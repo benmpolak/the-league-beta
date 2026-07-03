@@ -308,3 +308,6 @@ input:focus, select:focus { border-color: var(--accent-dim); }
 /* --- The League 26/27 additions --- */
 .status-chip { font-size: 12px; margin-left: 2px; }
 .playoff-line td { border-bottom: 2px solid var(--accent); }
+.headshot { width: 28px; height: 36px; border-radius: 5px; object-fit: cover; object-position: top; background: var(--bg2); flex-shrink: 0; }
+.pool-table .headshot { width: 32px; height: 41px; }
+.kit { width: 22px; height: 28px; object-fit: contain; flex-shrink: 0; }

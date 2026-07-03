@@ -331,6 +331,13 @@ const flagImg = (team, big = false) => {
   const t = TEAM_BY_NAME[team];
   return t ? `<img class="flag${big ? ' big' : ''}" loading="lazy" src="https://resources.premierleague.com/premierleague/badges/70/t${t.code}.png" alt="${esc(team)}" title="${esc(team)}">` : '';
 };
+// official PL headshot, falling back to the league's own "Photo Missing" card
+const photoImg = p => `<img class="headshot" loading="lazy" src="https://resources.premierleague.com/premierleague/photos/players/110x140/p${p.code}.png" onerror="this.onerror=null;this.src='https://resources.premierleague.com/premierleague/photos/players/110x140/Photo-Missing.png'" alt="${esc(p.name)}">`;
+// the actual kit artwork FPL uses (GK variant for keepers)
+const kitImg = (team, gk = false) => {
+  const t = TEAM_BY_NAME[team];
+  return t ? `<img class="kit" loading="lazy" src="https://fantasy.premierleague.com/dist/img/shirts/standard/shirt_${t.code}${gk ? '_1' : ''}-66.png" alt="${esc(team)}" title="${esc(team)}">` : '';
+};
 // injury/availability chip from the FPL status flag
 const STATUS_ICON = { d: '⚠️', i: '🏥', s: '🟥', u: '🚫', n: '🚫' };
 const statusChip = p => STATUS_ICON[p.status]
@@ -1272,7 +1279,7 @@ function viewDraft() {
         <h2>${esc(managerName(mid))}'s squad</h2>
         <div class="quota-bar">${quotaPills(mid)}</div>
         ${managerSquad(mid).sort((a, b) => POS_ORDER[a.pos] - POS_ORDER[b.pos]).map(p => `
-          <div class="srow"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)}<span>${esc(p.name)}</span></div>
+          <div class="srow"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${kitImg(p.team, p.pos === 'GK')}<span>${esc(p.name)}</span></div>
         `).join('') || '<span class="muted">No picks yet</span>'}
       </div>
       ${punditryDesk()}
@@ -1336,8 +1343,8 @@ function poolTable() {
     <tbody>
       ${rows.map(p => `
       <tr>
-        <td><div class="pcell">${flagImg(p.team)}<div><div class="pname">${esc(p.name)}</div><div class="pclub">${esc(p.full)}</div></div></div></td>
-        <td class="muted">${esc(p.club)}</td>
+        <td><div class="pcell">${photoImg(p)}<div><div class="pname">${esc(p.name)}</div><div class="pclub">${esc(p.full)}</div></div></div></td>
+        <td class="muted" style="white-space:nowrap">${flagImg(p.team)} ${esc(p.club)}</td>
         <td><span class="pos-badge pos-${p.pos}">${p.pos}</span></td>
         <td>${statusChip(p)}</td>
         <td class="num">${p.price.toFixed(1)}</td>
@@ -1477,9 +1484,9 @@ function viewTeam() {
           const pts = gwPlayerPoints(p.id, gw);
           return `<div class="squad-row lineup-row ${starting ? 'starting' : 'benched'}" data-toggle="${p.id}" ${locked ? '' : 'style="cursor:pointer"'}>
             <span class="shirt-no" data-num="${p.id}" title="Click to assign a squad number">${shirtNum(mid, p.id)}</span>
-            <span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)}
-            <span>${esc(p.name)}</span>
-            <span class="muted" style="font-size:11.5px">${esc(p.team)}</span>
+            <span class="pos-badge pos-${p.pos}">${p.pos}</span>${kitImg(p.team, p.pos === 'GK')}
+            <span>${esc(p.name)} ${statusChip(p)}</span>
+            <span class="muted" style="font-size:11.5px">${esc(p.club)}</span>
             <span class="sp-pts ${pts > 0 ? 'gold' : 'muted'}">${pts}</span>
             <span class="xi-chip">${starting ? 'XI' : 'bench'}</span>
           </div>`;
@@ -1605,7 +1612,7 @@ function bindTeam() {
       results.innerHTML = hint + pool.slice(0, 20).map(p => {
         const ok = outP && squadShapeOk([...squadAfterOut, p]);
         const why = !outP ? 'Pick who goes out first' : 'Breaks the squad position limits';
-        return `<div class="lrow"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)} ${esc(p.name)} ${statusChip(p)} <span class="muted" style="font-size:11px">${esc(p.club)} · ${rating(p)} pts</span>
+        return `<div class="lrow"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${photoImg(p)} ${esc(p.name)} ${statusChip(p)} <span class="muted" style="font-size:11px">${esc(p.club)} · ${rating(p)} pts</span>
          <button class="btn small" style="margin-left:auto" data-trin="${p.id}" ${ok ? '' : `disabled title="${why}"`}>Sign</button></div>`;
       }).join('') || '<span class="muted">The Trough is empty. Somehow.</span>';
       results.querySelectorAll('[data-trin]').forEach(b => b.onclick = () => {
@@ -1823,15 +1830,15 @@ function viewTable() {
       <div class="breakdown" id="bd-${m.id}" style="display:none">
         ${managerSquad(m.id).map(p => ({ p, c: contributedPoints(m.id, p.id), r: playerPoints(p.id) }))
           .sort((a, b) => b.c - a.c)
-          .map(({ p, c, r }) => `<div class="squad-row" title="All-tournament: ${esc(r.lines.join(' · ') || 'nothing yet')}"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)}<span>${esc(p.name)}</span><span class="muted" style="margin-left:8px;font-size:11.5px">${esc(r.lines.join(' · '))}</span><span class="sp-pts">${c}</span></div>`).join('') || '<span class="muted">Empty squad</span>'}
+          .map(({ p, c, r }) => `<div class="squad-row" title="Season: ${esc(r.lines.join(' · ') || 'nothing yet')}"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${photoImg(p)}<span>${esc(p.name)}</span><span class="muted" style="margin-left:8px;font-size:11.5px">${esc(r.lines.join(' · '))}</span><span class="sp-pts">${c}</span></div>`).join('') || '<span class="muted">Empty squad</span>'}
         <p class="muted" style="font-size:11px;margin-top:8px">Points shown are what each player banked while in the starting XI.</p>
       </div>`;
     }).join('')}
     <div class="card toplist" style="margin-top:24px">
       <h2>Top players (all drafted &amp; signed)</h2>
       ${allDrafted.map(({ p, pts }) => `
-        <div class="squad-row"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)}
-        <span>${esc(p.name)}</span>
+        <div class="squad-row"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${photoImg(p)}
+        <span>${esc(p.name)}</span> <span class="muted" style="font-size:11px">${esc(p.club)}</span>
         <span class="sp-pts gold">${pts}</span></div>`).join('') || '<span class="muted">Points appear once matches are played and synced.</span>'}
     </div>`;
 }
