@@ -2064,6 +2064,34 @@ function rivalryFor(a, b, seed) {
   const hits = RIVALRIES.filter(r => (r.pair[0] === a && r.pair[1] === b) || (r.pair[0] === b && r.pair[1] === a));
   return hits.length ? hits[seed % hits.length].line : null;
 }
+/* ----- from the terraces (requested by Marc, 03/07/2026, 12:59) ----- */
+const CHANTS = [
+  '\u{1F3B5} One {star}! There\u2019s only one {star}!',
+  '\u{1F3B5} {hmgr}\u2019s barmy army! {hmgr}\u2019s barmy army!',
+  '\u{1F3B5} Stand up if you hate {away}!',
+  '\u{1F3B5} You\u2019re getting dropped in the mo-o-orning \u2014 dropped in the morning!',
+  '\u{1F3B5} 2-1 to the {home}! (Prutton, from the away end)',
+  '\u{1F3B5} Que sera sera, whatever will be will be, we\u2019re going to {stadium}, que sera sera',
+  '\u{1F3B5} Is this the Emirates? Is this the Emirates?',
+  '\u{1F3B5} We forgot that you were here \u2014 we forgot that you were he-ere',
+  '\u{1F3B5} Empty seats! Empty seats! (the {stadium} faithful, all four of them)',
+  '\u{1F4CB} A banner unfurls at {stadium}: \u201CWELCOME TO HELL\u201D. Stewards confirm it is laminated.',
+  '\u{1F3B5} You\u2019ve only got one Lobus \u2014 one Lobus, you\u2019ve only got one Lobus',
+  '\u{1F3B5} We want our fifty quid back! We want our fifty quid back!',
+  '\u{1F3B5} {amgr}, give us a wave \u2014 {amgr}, {amgr}, give us a wave',
+  '\u{1F3B5} Sacked in the morning, you\u2019re getting sacked in the morning ({away} board: no comment)',
+  '\u{1F3B5} Shall we sing a song for you? The {stadium} end asks, genuinely, out of concern',
+];
+function chantFor(a, b, i) {
+  const seed = (i * 2654435761 + a * 97 + b * 13) >>> 0;
+  const t = CHANTS[seed % CHANTS.length];
+  const xi = lineupFor(a, i).map(pid => PLAYER_BY_ID[pid]).sort((x, y) => rating(y) - rating(x));
+  return t.replaceAll('{star}', xi[0]?.name || 'the big man')
+    .replaceAll('{home}', teamName(a)).replaceAll('{away}', teamName(b))
+    .replaceAll('{hmgr}', managerName(a).split(' ')[0]).replaceAll('{amgr}', managerName(b).split(' ')[0])
+    .replaceAll('{stadium}', stadium(a));
+}
+
 function gwPreviewCard(i) {
   if (i >= REGULAR_GWS || gwStatus(i) === 'final' || !state.draft.picks.length) return '';
   const pairs = pairingsFor(i);
@@ -2118,6 +2146,7 @@ function gwPreviewCard(i) {
         </div>
         <div class="venue-line">at ${esc(stadium(r.a))}</div>
         ${notes(r).map(n => `<div class="preview-note">${esc(n)}</div>`).join('')}
+        <div class="preview-note chant">${esc(chantFor(r.a, r.b, i))}</div>
       </div>`;
     }).join('')}
     ${trough}
