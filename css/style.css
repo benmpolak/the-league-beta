@@ -348,3 +348,18 @@ input:focus, select:focus { border-color: var(--accent-dim); }
 .pitch-chip { min-width: 84px; padding: 8px 10px; }
 .pitch-chip .kit { width: 44px; height: 56px; }
 .pitch-name { font-size: 12px; }
+.bench-strip { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; padding: 8px; background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; }
+.bench-strip .pitch-chip { min-width: 64px; padding: 4px 6px; opacity: .75; }
+.bench-strip .pitch-chip .kit { width: 30px; height: 38px; }
+.bench-strip .pitch-name { text-shadow: none; }
+.pitch-chip.dragover { outline: 2px dashed var(--accent); outline-offset: 2px; }
+.mu-card { max-width: 560px; width: 96%; max-height: 92vh; overflow-y: auto; }
+.mu-pitch { min-height: 0; padding: 14px 6px; gap: 8px; }
+.mu-pitch .pitch-row { flex: none; }
+.mu-pitch .pitch-chip { min-width: 58px; padding: 3px 5px; }
+.mu-pitch .pitch-chip .kit { width: 28px; height: 35px; }
+.mu-pitch .pitch-name { font-size: 9.5px; }
+.mu-pts { font-size: 10px; font-weight: 800; color: #ffd75e; text-shadow: 0 1px 2px #000; }
+.mu-pts.xp { color: #cfe3d4; opacity: .8; }
+.mu-divider { border-top: 2px solid #ffffff33; margin: 4px 10px; text-align: center; }
+.mu-divider span { font-size: 10px; color: #ffffffb0; font-style: italic; }

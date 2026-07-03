@@ -938,7 +938,7 @@ function render() {
   switch (state.view) {
     case 'draft': main.innerHTML = viewDraft(); bindDraft(); break;
     case 'team': main.innerHTML = viewTeam(); bindTeam(); break;
-    case 'h2h': main.innerHTML = viewH2H(); break;
+    case 'h2h': main.innerHTML = viewH2H(); bindH2H(); break;
     case 'cup': main.innerHTML = viewCup(); break;
     case 'table': main.innerHTML = viewTable(); bindTable(); break;
     case 'fixtures': main.innerHTML = viewFixtures(); bindFixtures(); break;
@@ -1707,6 +1707,28 @@ function viewTeam() {
     <span class="tag">GW points: <b class="gold">&nbsp;${gwManagerPoints(mid, gw)}</b></span>
     <button class="tag" id="stadiumBtn" style="cursor:pointer" title="Rename your stadium">&#127967; ${esc(stadium(mid))}</button>
   </div>
+  <div class="card" style="margin-bottom:18px">
+    <h2>The pitch <span class="muted" style="font-weight:400;font-size:12px">tap two players in a line to swap them — left back goes left</span></h2>
+    <div class="pitch">
+      ${['GK', 'DF', 'MF', 'FW'].map(pos => `
+        <div class="pitch-row">
+          ${xi.map(pid => PLAYER_BY_ID[pid]).filter(p => p.pos === pos).map(p => `
+            <div class="pitch-chip ${teamView.pitchSel === p.id ? 'sel' : ''}" data-pitch="${p.id}" draggable="${!locked}">
+              ${kitImg(p.team, p.pos === 'GK')}
+              <span class="pitch-name">${esc(p.name)}</span>
+            </div>`).join('') || '<span class="muted" style="font-size:11px">—</span>'}
+        </div>`).join('')}
+    </div>
+    <div class="bench-strip">
+      <span class="muted" style="font-size:11px;font-weight:700;align-self:center">BENCH</span>
+      ${squad.filter(p => !xi.includes(p.id)).map(p => `
+        <div class="pitch-chip benched ${teamView.pitchSel === p.id ? 'sel' : ''}" data-pitch="${p.id}" draggable="${!locked}">
+          ${kitImg(p.team, p.pos === 'GK')}
+          <span class="pitch-name">${esc(p.name)}</span>
+        </div>`).join('')}
+    </div>
+    <p class="muted" style="font-size:11px;margin-top:6px">Drag (or tap two players) to swap — within a line to arrange it, bench onto pitch to make a substitution.</p>
+  </div>
   <div class="draft-layout">
     <div class="card">
       <h2>Starting XI — GW${GAMEWEEKS[gw].n} <span class="muted" style="font-weight:400">(tap to swap)</span></h2>
@@ -1726,19 +1748,6 @@ function viewTeam() {
             <span class="xi-chip">${starting ? 'XI' : 'bench'}</span>
           </div>`;
         }).join('')}`).join('')}
-    </div>
-    <div class="card">
-      <h2>The pitch <span class="muted" style="font-weight:400;font-size:12px">tap two players in a line to swap them — left back goes left</span></h2>
-      <div class="pitch">
-        ${['GK', 'DF', 'MF', 'FW'].map(pos => `
-          <div class="pitch-row">
-            ${xi.map(pid => PLAYER_BY_ID[pid]).filter(p => p.pos === pos).map(p => `
-              <div class="pitch-chip ${teamView.pitchSel === p.id ? 'sel' : ''}" data-pitch="${p.id}">
-                ${kitImg(p.team, p.pos === 'GK')}
-                <span class="pitch-name">${esc(p.name)}</span>
-              </div>`).join('') || '<span class="muted" style="font-size:11px">—</span>'}
-          </div>`).join('')}
-      </div>
     </div>
     <div class="draft-side">
       <div class="card">
@@ -1842,22 +1851,58 @@ function bindTeam() {
     save(); render();
     toast(`${v.trim()} — naming rights sold for nothing.`);
   };
-  // --- the pitch: arrange a line left-to-right by swapping two players ---
-  document.querySelectorAll('[data-pitch]').forEach(chip => chip.onclick = () => {
-    if (!demoMode && gwHasStarted(gw)) { toast('Lineup is locked for this gameweek'); return; }
-    if (!canActFor(mid)) { toast(`That's ${managerName(mid)}'s pitch, not yours`); return; }
-    const pid = +chip.dataset.pitch;
-    if (teamView.pitchSel == null) { teamView.pitchSel = pid; render(); return; }
-    if (teamView.pitchSel === pid) { teamView.pitchSel = null; render(); return; }
-    const a = PLAYER_BY_ID[teamView.pitchSel], b = PLAYER_BY_ID[pid];
-    if (a.pos !== b.pos) { toast(`Same line only — ${a.name} is a ${a.pos}, ${b.name} is a ${b.pos}`); teamView.pitchSel = pid; render(); return; }
+  // --- the pitch: swap two players (tap-tap or drag-drop) ---
+  const pitchSwap = (pidA, pidB) => {
+    if (pidA === pidB) return;
+    const a = PLAYER_BY_ID[pidA], b = PLAYER_BY_ID[pidB];
     const xi2 = [...lineupFor(mid, gw)];
-    const ia = xi2.indexOf(a.id), ib = xi2.indexOf(b.id);
-    [xi2[ia], xi2[ib]] = [xi2[ib], xi2[ia]];
+    const ia = xi2.indexOf(pidA), ib = xi2.indexOf(pidB);
+    if (ia >= 0 && ib >= 0) {
+      // both on the pitch: arrange within a line
+      if (a.pos !== b.pos) { toast(`Same line only — ${a.name} is a ${a.pos}, ${b.name} is a ${b.pos}`); return; }
+      [xi2[ia], xi2[ib]] = [xi2[ib], xi2[ia]];
+    } else if (ia >= 0 || ib >= 0) {
+      // substitution: pitch player off, bench player on
+      const inIdx = ia >= 0 ? ia : ib;
+      const onPid = ia >= 0 ? pidA : pidB, offPid = ia >= 0 ? pidB : pidA;
+      const trial = [...xi2];
+      trial[inIdx] = offPid;
+      if (!xiValid(trial)) { toast('That substitution breaks the XI shape (1 GK, 3–5 DF, 2–5 MF, 1–3 FW)'); return; }
+      xi2[inIdx] = offPid;
+      void onPid;
+    } else return; // two bench players — nothing to do
     (state.lineups[mid] = state.lineups[mid] || {})[gw] = xi2;
     pushShared(`lineups/${mid}/${gw}`, xi2);
     teamView.pitchSel = null;
     save(); render();
+  };
+  const pitchGuard = () => {
+    if (!demoMode && gwHasStarted(gw)) { toast('Lineup is locked for this gameweek'); return false; }
+    if (!canActFor(mid)) { toast(`That's ${managerName(mid)}'s pitch, not yours`); return false; }
+    return true;
+  };
+  let dragPid = null;
+  document.querySelectorAll('[data-pitch]').forEach(chip => {
+    chip.onclick = () => {
+      if (!pitchGuard()) return;
+      const pid = +chip.dataset.pitch;
+      if (teamView.pitchSel == null) { teamView.pitchSel = pid; render(); return; }
+      if (teamView.pitchSel === pid) { teamView.pitchSel = null; render(); return; }
+      pitchSwap(teamView.pitchSel, pid);
+    };
+    chip.ondragstart = e => {
+      if (!pitchGuard()) { e.preventDefault(); return; }
+      dragPid = +chip.dataset.pitch;
+      e.dataTransfer.effectAllowed = 'move';
+    };
+    chip.ondragover = e => { e.preventDefault(); chip.classList.add('dragover'); };
+    chip.ondragleave = () => chip.classList.remove('dragover');
+    chip.ondrop = e => {
+      e.preventDefault();
+      chip.classList.remove('dragover');
+      if (dragPid != null) pitchSwap(dragPid, +chip.dataset.pitch);
+      dragPid = null;
+    };
   });
   // --- custom squad numbers ---
   document.querySelectorAll('[data-num]').forEach(el => el.onclick = e => {
@@ -2052,6 +2097,49 @@ function playoffCard() {
 }
 
 /* ----- head-to-head ----- */
+/* ----- fixture matchup: two XIs face to face ----- */
+function showMatchup(a, b, i) {
+  $('#muOverlay')?.remove();
+  const started = gwStatus(i) !== 'upcoming';
+  const xiOf = mid => started ? effectiveXI(mid, i).xi : lineupFor(mid, i);
+  const chip = (pid, side) => {
+    const p = PLAYER_BY_ID[pid];
+    const pts = started ? gwPlayerPoints(pid, i) : null;
+    return `<div class="pitch-chip mu-chip ${side}" data-pcard="${p.id}">
+      ${kitImg(p.team, p.pos === 'GK')}
+      <span class="pitch-name">${esc(p.name)}</span>
+      ${pts != null ? `<span class="mu-pts">${pts}</span>` : `<span class="mu-pts xp">${playerXp(p).toFixed(1)}</span>`}
+    </div>`;
+  };
+  const rows = mid => ['GK', 'DF', 'MF', 'FW'].map(pos =>
+    `<div class="pitch-row">${xiOf(mid).map(pid => PLAYER_BY_ID[pid]).filter(p => p.pos === pos).map(p => chip(p.id, '')).join('')}</div>`);
+  const pa = started ? gwManagerPoints(a, i) : projectedGwScore(a, i);
+  const pb = started ? gwManagerPoints(b, i) : projectedGwScore(b, i);
+  const ov = document.createElement('div');
+  ov.id = 'muOverlay';
+  ov.className = 'overlay';
+  ov.innerHTML = `<div class="card mu-card">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <h2 style="flex:1">${esc(teamName(a))} <span class="fx-score">${pa} &ndash; ${pb}</span> ${esc(teamName(b))}</h2>
+      <button class="btn ghost small" id="muClose">&#10005;</button>
+    </div>
+    <p class="venue-line" style="margin:0 0 8px">GW${GAMEWEEKS[i].n} &middot; at ${esc(stadium(a))} &middot; ${started ? (gwStatus(i) === 'final' ? 'full time' : 'in play') : 'projected — tap any player for stats'}</p>
+    <div class="pitch mu-pitch">
+      ${rows(a).join('')}
+      <div class="mu-divider"><span>${esc(chantFor(a, b, i)).replace(/^\u{1F3B5} |^\u{1F4CB} /u, '')}</span></div>
+      ${rows(b).reverse().join('')}
+    </div>
+  </div>`;
+  ov.onclick = e => { if (e.target === ov || e.target.id === 'muClose') ov.remove(); };
+  document.body.appendChild(ov);
+}
+function bindH2H() {
+  document.querySelectorAll('[data-mu]').forEach(el => el.onclick = () => {
+    const [a, b, i] = el.dataset.mu.split(':').map(Number);
+    showMatchup(a, b, i);
+  });
+}
+
 /* ----- the weekly preview ----- */
 function lastMeetings(a, b, before) {
   const res = [];
@@ -2158,7 +2246,7 @@ function gwPreviewCard(i) {
       const pct = Math.round(r.p * 100);
       return `<div class="preview-fx${r === motw ? ' motw' : ''}">
         ${r === motw ? '<div class="motw-tag">&#11088; MATCHUP OF THE WEEK</div>' : ''}
-        <div class="h2h-fx">
+        <div class="h2h-fx" data-mu="${r.a}:${r.b}:${i}" style="cursor:pointer" title="Tap for the matchup">
           <span style="flex:1;text-align:right">${esc(teamName(r.a))} <b class="pct">${pct}%</b></span>
           <span class="fx-score" title="projected score">${r.sa} &ndash; ${r.sb}</span>
           <span style="flex:1"><b class="pct">${100 - pct}%</b> ${esc(teamName(r.b))}</span>
@@ -2221,7 +2309,7 @@ function viewH2H() {
         const pa = st === 'upcoming' ? '–' : gwManagerPoints(a, i);
         const pb = st === 'upcoming' ? '–' : gwManagerPoints(b, i);
         const aWin = st === 'final' && pa > pb, bWin = st === 'final' && pb > pa;
-        return `<div class="h2h-fx">
+        return `<div class="h2h-fx" data-mu="${a}:${b}:${i}" style="cursor:pointer" title="Tap for the matchup">
           <span class="${aWin ? 'h2h-win' : ''}" style="flex:1;text-align:right">${esc(teamName(a))} <span class="muted" style="font-size:10px">(H)</span></span>
           <span class="fx-score">${pa} &ndash; ${pb}</span>
           <span class="${bWin ? 'h2h-win' : ''}" style="flex:1">${esc(teamName(b))}</span>
