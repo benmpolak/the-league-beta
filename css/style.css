@@ -381,3 +381,7 @@ tr.st-amber td { background: rgba(224, 168, 60, .06); }
 tr.st-red .pname { color: #ff9c9c; }
 .squad-row.st-red { box-shadow: inset 3px 0 0 #e05555; background: rgba(224, 85, 85, .06); }
 .squad-row.st-amber { box-shadow: inset 3px 0 0 #e0a83c; background: rgba(224, 168, 60, .05); }
+.mu-bench { margin-top: 4px; padding-top: 6px; border-top: 1px dashed rgba(38,50,80,.7); }
+.sub-arrow { font-size: 10px; font-weight: 800; }
+.sub-arrow.in { color: #3fb96d; }
+.sub-arrow.out { color: #e05555; }

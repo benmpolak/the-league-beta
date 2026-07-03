@@ -2899,23 +2899,48 @@ let muView = 'pitch';
 function showMatchup(a, b, i) {
   $('#muOverlay')?.remove();
   const started = gwStatus(i) !== 'upcoming';
-  const xiOf = mid => started ? effectiveXI(mid, i).xi : lineupFor(mid, i);
-  const chip = pid => {
+  const effInfo = {};
+  for (const mid of [a, b]) effInfo[mid] = started ? effectiveXI(mid, i) : { xi: lineupFor(mid, i), subs: [] };
+  const xiOf = mid => effInfo[mid].xi;
+  const chip = (pid, mid) => {
     const p = PLAYER_BY_ID[pid];
     const pts = started ? gwPlayerPoints(pid, i) : null;
-    return `<div class="pitch-chip mu-chip" data-pcard="${p.id}">
+    const cameOn = effInfo[mid].subs.some(s => s.in === pid);
+    return `<div class="pitch-chip mu-chip ${statusClass(p)}" data-pcard="${p.id}">
+      ${cameOn ? '<span class="sub-arrow in" title="Auto-sub — came on">&#9650;</span>' : ''}
       ${kitImg(p.team, p.pos === 'GK')}
       <span class="pitch-name">${esc(p.name)}</span>
       ${pts != null ? `<span class="mu-pts">${pts}</span>` : `<span class="pitch-vs">${esc(nextOpp(p.team, GAMEWEEKS[i].n) || '')}</span>`}
     </div>`;
   };
+  // the bench: unused subs in priority order, then anyone auto-subbed OUT
+  const benchOf = mid => {
+    const xi = new Set(xiOf(mid));
+    const outs = new Set(effInfo[mid].subs.map(s => s.out));
+    return [...benchFor(mid, i).filter(p => !xi.has(p.id)), ...squadAt(mid, i).filter(p => outs.has(p.id))];
+  };
+  const sideBench = mid => {
+    const outs = new Set(effInfo[mid].subs.map(s => s.out));
+    const bench = benchOf(mid);
+    if (!bench.length) return '';
+    return `<div class="bench-strip mu-bench">
+      <span class="muted" style="font-size:10px;font-weight:700;align-self:center">BENCH</span>
+      ${bench.map(p => `<div class="pitch-chip mu-chip benched ${statusClass(p)}" data-pcard="${p.id}">
+        ${outs.has(p.id) ? '<span class="sub-arrow out" title="Auto-subbed out — did not play">&#9660;</span>' : ''}
+        ${kitImg(p.team, p.pos === 'GK')}
+        <span class="pitch-name">${esc(p.name)}</span>
+        ${started ? `<span class="mu-pts">${gwPlayerPoints(p.id, i)}</span>` : ''}
+      </div>`).join('')}
+    </div>`;
+  };
   const sidePitch = mid => `<div class="pitch mu-pitch">
     ${['GK', 'DF', 'MF', 'FW'].map(pos =>
-      `<div class="pitch-row">${xiOf(mid).map(pid => PLAYER_BY_ID[pid]).filter(p => p.pos === pos).map(p => chip(p.id)).join('')}</div>`).join('')}
-  </div>`;
+      `<div class="pitch-row">${xiOf(mid).map(pid => PLAYER_BY_ID[pid]).filter(p => p.pos === pos).map(p => chip(p.id, mid)).join('')}</div>`).join('')}
+  </div>${sideBench(mid)}`;
   const sideTable = mid => `<div>${xiOf(mid).map(pid => PLAYER_BY_ID[pid])
     .sort((x, y) => POS_ORDER[x.pos] - POS_ORDER[y.pos])
-    .map(p => `<div class="lrow" style="font-size:12px"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${pname(p)}<span class="sp-pts ${started && gwPlayerPoints(p.id, i) > 0 ? 'gold' : 'muted'}" style="margin-left:auto">${started ? gwPlayerPoints(p.id, i) : playerXp(p).toFixed(1)}</span></div>`).join('')}</div>`;
+    .map(p => `<div class="lrow" style="font-size:12px"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${pname(p)}<span class="sp-pts ${started && gwPlayerPoints(p.id, i) > 0 ? 'gold' : 'muted'}" style="margin-left:auto">${started ? gwPlayerPoints(p.id, i) : playerXp(p).toFixed(1)}</span></div>`).join('')}
+    ${benchOf(mid).map(p => `<div class="lrow" style="font-size:11.5px;opacity:.65"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${pname(p)}<span class="xi-chip">bench</span><span class="sp-pts muted" style="margin-left:auto">${started ? gwPlayerPoints(p.id, i) : ''}</span></div>`).join('')}</div>`;
   const side = mid => `<div class="mu-side">
     <h3 style="text-align:center">${esc(teamName(mid))} <b class="gold">${started ? gwManagerPoints(mid, i) : projectedGwScore(mid, i)}</b></h3>
     ${muView === 'pitch' ? sidePitch(mid) : sideTable(mid)}
