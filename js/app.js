@@ -132,7 +132,7 @@ const netOn = () => syncOn() && !demoMode;
 const isCommissioner = () => whoami === state.managers[0]?.id;
 const canActFor = mid => demoMode || !syncOn() || whoami === mid || isCommissioner();
 
-const SHARED_KEYS = ['phase', 'managers', 'settings', 'draft', 'lineups', 'transfers', 'claims', 'waiverMeta', 'autolists', 'adjustments', 'shirtNums'];
+const SHARED_KEYS = ['phase', 'managers', 'settings', 'draft', 'lineups', 'transfers', 'trades', 'claims', 'waiverMeta', 'autolists', 'adjustments', 'shirtNums'];
 function sharedSnapshot() {
   const o = {};
   for (const k of SHARED_KEYS) o[k] = state[k];
@@ -178,6 +178,7 @@ window.onSharedSnapshot = data => {
   // first sight of a fresh draft on this device → roll the opening ceremony
   const fresh = data.phase === 'draft' && data.draft.picks.length === 0;
   data.transfers = toArr(data.transfers);
+  data.trades = toArr(data.trades);
   data.autolists = data.autolists || {};
   for (const mid of Object.keys(data.autolists)) data.autolists[mid] = toArr(data.autolists[mid]);
   data.lineups = data.lineups || {};
@@ -233,6 +234,7 @@ function freshState() {
     lineups: {},           // managerId -> { gwIndex: [pid x11] }
     shirtNums: {},         // managerId -> { pid: customNumber }
     transfers: [],         // [{managerId, outId, inId, gw, n, t, trade?, waiver?}]
+    trades: [],            // [{id, from, to, give, get, status: pending|done|rejected|withdrawn, t}]
     claims: {},            // gwIndex -> { managerId: [{in, out}] ranked }
     waiverMeta: { lastRun: null, control: 'auto' }, // control: auto | open | closed
     fixtures: [],
@@ -326,6 +328,7 @@ function load() {
     if (s && !s.lineups) { s.lineups = {}; s.transfers = []; } // migrate pre-lineup saves
     if (s && !s.claims) s.claims = {};
     if (s && !s.autolists) s.autolists = {};
+    if (s && !s.trades) s.trades = [];
     if (s && !s.waiverMeta) s.waiverMeta = { lastRun: null, control: 'auto' };
     if (s && !s.shirtNums) s.shirtNums = {};
     if (s && s.settings.pickTimer == null) s.settings.pickTimer = 30;
@@ -527,6 +530,53 @@ function waiverOrder(gwIdx) {
   const base = anyFinal ? rows.map(r => r.id) : [...state.draft.order];
   return [...base].reverse(); // bottom feeds first
 }
+/* ---------------- trades (Draft Fantasy style: propose, accept, done) ---------------- */
+function proposeTrade(from, to, give, get) {
+  state.trades = [...toArr(state.trades), { id: Date.now() + '-' + from, from, to, give, get, status: 'pending', t: Date.now() }];
+  pushShared('trades', state.trades);
+  save(); render();
+  toast(`Trade proposed to ${managerName(to)}. Their move.`);
+}
+function respondTrade(id, accept) {
+  const tr = toArr(state.trades).find(x => x.id === id);
+  if (!tr || tr.status !== 'pending') return;
+  if (!accept) {
+    tr.status = 'rejected';
+    pushShared('trades', state.trades);
+    save(); render();
+    toast('Trade rejected. Nothing personal. (It was personal.)');
+    return;
+  }
+  const cur = currentGwIndex();
+  const pa = PLAYER_BY_ID[tr.give], pb = PLAYER_BY_ID[tr.get];
+  // validate at acceptance time — squads may have changed since the proposal
+  if (!managerSquad(tr.from).some(x => x.id === tr.give) || !managerSquad(tr.to).some(x => x.id === tr.get)) {
+    tr.status = 'withdrawn';
+    pushShared('trades', state.trades);
+    save(); render();
+    toast('Trade void — a player involved has already moved on.');
+    return;
+  }
+  if (!squadShapeOk([...squadAt(tr.from, cur).filter(p => p.id !== tr.give), pb]) ||
+      !squadShapeOk([...squadAt(tr.to, cur).filter(p => p.id !== tr.get), pa])) {
+    toast('Trade would break a squad\'s position limits'); return;
+  }
+  tr.status = 'done';
+  state.transfers.push({ managerId: tr.from, outId: tr.give, inId: tr.get, gw: cur, n: state.transfers.length + 1, t: Date.now(), trade: true });
+  state.transfers.push({ managerId: tr.to, outId: tr.get, inId: tr.give, gw: cur, n: state.transfers.length + 1, t: Date.now(), trade: true });
+  for (const [m2, gone] of [[tr.from, tr.give], [tr.to, tr.get]]) {
+    const lu = state.lineups[m2]?.[cur];
+    if (lu) {
+      state.lineups[m2][cur] = lu.filter(pid => pid !== gone);
+      pushShared(`lineups/${m2}/${cur}`, state.lineups[m2][cur]);
+    }
+  }
+  pushShared('trades', state.trades);
+  pushShared('transfers', state.transfers);
+  save(); render();
+  toast(`Trade done: ${pa.name} ↔ ${pb.name}. Executed instantly, as is right and proper.`);
+}
+
 /* ---------------- draft logic ---------------- */
 function totalPicks() { return state.managers.length * state.settings.squadSize; }
 function pickNo() { return state.draft.picks.length; }
@@ -1696,9 +1746,17 @@ function viewTeam() {
           `<div class="lrow" style="font-size:12.5px;padding:3px 0"><span class="muted">GW${GAMEWEEKS[t.gw].n}${t.trade ? ' ↔' : ''}</span> ${esc(PLAYER_BY_ID[t.outId].name)} <span class="muted">→</span> <b>${esc(PLAYER_BY_ID[t.inId].name)}</b></div>`).join('') || '<span class="muted" style="font-size:12.5px">None yet.</span>'}
       </div>
       <div class="card">
-        <h2>Trade desk</h2>
-        <p class="muted" style="font-size:12px;margin-bottom:10px">Agreed in the group? Swap one player between two squads. Doesn't use a waiver turn.</p>
-        <select id="tradeWith" style="width:100%;margin-bottom:8px">
+        <h2>Trade desk ${toArr(state.trades).some(t => t.status === 'pending' && t.to === mid) ? '<span class="tag live-tag">OFFER IN</span>' : ''}</h2>
+        <p class="muted" style="font-size:12px;margin-bottom:10px">Propose a swap; it executes the instant the other manager accepts. Doesn't touch waivers.</p>
+        ${toArr(state.trades).filter(t => t.status === 'pending' && (t.to === mid || t.from === mid)).map(t => `
+          <div class="lrow" style="font-size:12.5px;flex-wrap:wrap">
+            <span><b>${esc(managerName(t.from))}</b> gives <b>${esc(PLAYER_BY_ID[t.give]?.name || '?')}</b> for <b>${esc(PLAYER_BY_ID[t.get]?.name || '?')}</b></span>
+            <span style="margin-left:auto;display:flex;gap:4px">
+              ${t.to === mid ? `<button class="btn small" data-tracc="${t.id}">Accept</button><button class="btn ghost small" data-trrej="${t.id}">Reject</button>`
+                : `<button class="btn ghost small" data-trwd="${t.id}">Withdraw</button>`}
+            </span>
+          </div>`).join('')}
+        <select id="tradeWith" style="width:100%;margin:8px 0">
           <option value="">Trade ${esc(managerName(mid))} with…</option>
           ${state.managers.filter(m => m.id !== mid).map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}
         </select>
@@ -1814,7 +1872,28 @@ function bindTeam() {
     }
     renderTrResults();
   }
-  // --- trade desk ---
+  // --- trade desk: propose / accept / reject / withdraw ---
+  document.querySelectorAll('[data-tracc]').forEach(b => b.onclick = () => {
+    const tr = toArr(state.trades).find(x => x.id === b.dataset.tracc);
+    if (!tr) return;
+    if (!canActFor(tr.to)) { toast(`Only ${managerName(tr.to)} can accept this`); return; }
+    respondTrade(tr.id, true);
+  });
+  document.querySelectorAll('[data-trrej]').forEach(b => b.onclick = () => {
+    const tr = toArr(state.trades).find(x => x.id === b.dataset.trrej);
+    if (!tr) return;
+    if (!canActFor(tr.to)) { toast(`Only ${managerName(tr.to)} can reject this`); return; }
+    respondTrade(tr.id, false);
+  });
+  document.querySelectorAll('[data-trwd]').forEach(b => b.onclick = () => {
+    const tr = toArr(state.trades).find(x => x.id === b.dataset.trwd);
+    if (!tr) return;
+    if (!canActFor(tr.from)) { toast(`Only ${managerName(tr.from)} can withdraw this`); return; }
+    tr.status = 'withdrawn';
+    pushShared('trades', state.trades);
+    save(); render();
+    toast('Offer withdrawn. Never happened.');
+  });
   const tradeWith = $('#tradeWith'), pickers = $('#tradePickers');
   if (tradeWith) {
     tradeWith.onchange = () => {
@@ -1826,34 +1905,23 @@ function bindTeam() {
       pickers.innerHTML = `
         <select id="tradeMine" style="width:100%;margin-bottom:8px">
           <option value="">${esc(managerName(mid))} gives…</option>
-          ${mine.map(p => `<option value="${p.id}">${p.pos} — ${esc(p.name)} (${esc(p.team)})</option>`).join('')}
+          ${mine.map(p => `<option value="${p.id}">${p.pos} — ${esc(p.name)} (${esc(p.club)})</option>`).join('')}
         </select>
         <select id="tradeTheirs" style="width:100%;margin-bottom:8px">
           <option value="">${esc(managerName(other))} gives…</option>
-          ${theirs.map(p => `<option value="${p.id}">${p.pos} — ${esc(p.name)} (${esc(p.team)})</option>`).join('')}
+          ${theirs.map(p => `<option value="${p.id}">${p.pos} — ${esc(p.name)} (${esc(p.club)})</option>`).join('')}
         </select>
-        <button class="btn small" id="tradeGo">Execute trade</button>`;
+        <button class="btn small" id="tradeGo">Propose trade</button>`;
       $('#tradeGo').onclick = () => {
-        if (!canActFor(mid) && !canActFor(other)) { toast('You are not part of this trade'); return; }
+        if (!canActFor(mid)) { toast(`That's ${managerName(mid)}'s trade to propose`); return; }
         const a = +$('#tradeMine').value, b = +$('#tradeTheirs').value;
         if (!a || !b) { toast('Pick a player from each side'); return; }
         const pa = PLAYER_BY_ID[a], pb = PLAYER_BY_ID[b];
         if (!squadShapeOk([...squadAt(mid, cur).filter(p => p.id !== a), pb]) ||
             !squadShapeOk([...squadAt(other, cur).filter(p => p.id !== b), pa])) {
-          toast('Trade breaks a squad\'s position limits'); return;
+          toast('Trade would break a squad\'s position limits'); return;
         }
-        state.transfers.push({ managerId: mid, outId: a, inId: b, gw: cur, n: state.transfers.length + 1, t: Date.now(), trade: true });
-        state.transfers.push({ managerId: other, outId: b, inId: a, gw: cur, n: state.transfers.length + 1, t: Date.now(), trade: true });
-        for (const [m2, gone] of [[mid, a], [other, b]]) {
-          const lu = state.lineups[m2]?.[cur];
-          if (lu) {
-            state.lineups[m2][cur] = lu.filter(id => id !== gone);
-            pushShared(`lineups/${m2}/${cur}`, state.lineups[m2][cur]);
-          }
-        }
-        pushShared('transfers', state.transfers);
-        save(); render();
-        toast(`Trade done: ${pa.name} ↔ ${pb.name}. Nobody saw anything.`);
+        proposeTrade(mid, other, a, b);
       };
     };
   }
