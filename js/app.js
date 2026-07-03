@@ -660,7 +660,7 @@ function makePick(playerId, force = false) {
     }
     if (total >= totalPicks()) {
       state.phase = 'season';
-      if (whoami === mid) state.view = 'team';
+      if (whoami === mid) state.view = 'dash';
       pushShared('phase', 'season');
       toast('Draft complete. The Committee has ratified the minutes. Game on.');
     } else if (Math.random() < 0.3) {
@@ -931,6 +931,7 @@ async function syncNow(manual = false) {
 
 /* ---------------- views ---------------- */
 const NAV_ITEMS = [
+  ['dash', 'Dashboard'],
   ['draft', 'The Console'],
   ['team', 'My Team'],
   ['transfers', 'Transfers'],
@@ -968,6 +969,7 @@ function render() {
     case 'draft': main.innerHTML = viewDraft(); bindDraft(); break;
     case 'team': main.innerHTML = viewTeam(); bindTeam(); break;
     case 'h2h': main.innerHTML = viewH2H(); bindH2H(); break;
+    case 'dash': main.innerHTML = viewDash(); bindDash(); break;
     case 'transfers': main.innerHTML = viewTransfers(); bindTransfers(); break;
     case 'cup': main.innerHTML = viewCup(); break;
     case 'table': main.innerHTML = viewTable(); bindTable(); break;
@@ -2205,6 +2207,68 @@ function bindTransfers() {
       };
     };
   }
+}
+
+/* ---------------- dashboard ---------------- */
+function viewDash() {
+  const mid = (whoami && whoami !== -1) ? whoami : state.managers[0].id;
+  const cur = currentGwIndex();
+  const pair = pairingsFor(cur).find(pr => pr.includes(mid));
+  const opp = pair ? (pair[0] === mid ? pair[1] : pair[0]) : null;
+  const started = gwHasStarted(cur);
+  const my = started ? gwManagerPoints(mid, cur) : projectedGwScore(mid, cur);
+  const their = opp ? (started ? gwManagerPoints(opp, cur) : projectedGwScore(opp, cur)) : 0;
+  const pct = opp ? Math.round(winChance(my, their) * 100) : null;
+  const flags = squadAt(mid, cur).filter(p => p.status && p.status !== 'a');
+  const offersIn = toArr(state.trades).filter(t => t.status === 'pending' && t.to === mid);
+  const myCl = myClaims(mid);
+  const news = [...state.transfers].slice(-5).reverse();
+  const covs = [...toArr(state.covenants)].slice(-2).reverse();
+  const table = h2hStandings(true);
+  const myPos = table.findIndex(r => r.id === mid) + 1;
+  const deadline = new Date(gwFrom(cur));
+  return `
+  <div class="settings-grid">
+    <div class="card">
+      <h2>GW${GAMEWEEKS[cur].n} — your matchup</h2>
+      ${pair ? `
+      <div class="h2h-fx" data-mu="${pair[0]}:${pair[1]}:${cur}" style="cursor:pointer;font-size:15px">
+        <span style="flex:1;text-align:right"><b>${esc(teamName(pair[0]))}</b></span>
+        <span class="fx-score">${started ? gwManagerPoints(pair[0], cur) : projectedGwScore(pair[0], cur)} &ndash; ${started ? gwManagerPoints(pair[1], cur) : projectedGwScore(pair[1], cur)}</span>
+        <span style="flex:1"><b>${esc(teamName(pair[1]))}</b></span>
+      </div>
+      <div class="venue-line">at ${esc(stadium(pair[0]))} &middot; ${started ? (gwStatus(cur) === 'final' ? 'full time' : 'in play — tap for the matchup') : `projected &middot; you're ${pct >= 50 ? '' : 'only '}${mid === pair[0] ? pct : 100 - pct}% to win it`}</div>
+      <div class="preview-note chant">${esc(chantFor(pair[0], pair[1], cur))}</div>` : '<p class="muted">No fixture this week — playoffs or the off-season.</p>'}
+      <p class="muted" style="font-size:12px;margin-top:10px">${started ? 'Lineups are locked.' : `Lineup locks ${deadline.toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}.`} You sit <b style="color:var(--text)">${myPos}${['th','st','nd','rd'][((myPos%100>10&&myPos%100<14)?0:Math.min(myPos%10,4))] || 'th'}</b>.</p>
+      <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn small" data-goto="team">Set my lineup</button>
+        <button class="btn ghost small" data-goto="transfers">Transfers</button>
+        <button class="btn ghost small" data-goto="h2h">Matches</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Needs your attention</h2>
+      ${flags.length ? `<h3>Squad flags</h3>${flags.map(p => `<div class="lrow" style="font-size:12.5px">${statusChip(p)} ${pname(p)} <span class="muted" style="font-size:11px">${esc(p.news || 'unavailable')}</span></div>`).join('')}` : '<p class="muted" style="font-size:12.5px">Squad fully fit. Enjoy it while it lasts.</p>'}
+      ${offersIn.length ? `<h3 style="margin-top:12px">Trade offers in</h3>${offersIn.map(t => `<div class="lrow" style="font-size:12.5px"><b>${esc(managerName(t.from))}</b> offers ${pname(PLAYER_BY_ID[t.get])} for ${pname(PLAYER_BY_ID[t.give])}</div>`).join('')}<button class="btn small" data-goto="transfers" style="margin-top:6px">Respond</button>` : ''}
+      <h3 style="margin-top:12px">Waivers</h3>
+      <p class="muted" style="font-size:12.5px">${myCl.length ? `${myCl.length} claim${myCl.length > 1 ? 's' : ''} lodged.` : 'No claims lodged.'} ${waiverControl() === 'auto' ? `Next run: ${nextWaiverRun(Math.max(lastWaiverRun(), Date.now())).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })} UTC.` : waiverControl() === 'open' ? 'The Trough is thrown open.' : 'The Trough is closed.'}</p>
+    </div>
+    <div class="card">
+      <h2>Around the league</h2>
+      ${news.length ? news.map(t => `<div class="lrow" style="font-size:12.5px"><span class="tag">${t.trade ? 'trade' : t.waiver ? 'waiver' : 'trough'}</span> <b>${esc(teamName(t.managerId))}</b> ${pname(PLAYER_BY_ID[t.outId])} <span class="muted">→</span> <b>${pname(PLAYER_BY_ID[t.inId])}</b></div>`).join('') : '<p class="muted" style="font-size:12.5px">No moves yet.</p>'}
+      ${covs.length ? `<h3 style="margin-top:12px">Latest covenants</h3>${covs.map(c => `<div class="lrow" style="font-size:12px">&#128220; <b>${esc(managerName(c.from))}</b> &harr; <b>${esc(managerName(c.to))}</b>: ${esc(c.text)}</div>`).join('')}` : ''}
+      <h3 style="margin-top:12px">The table</h3>
+      ${table.slice(0, 4).map((r, i) => `<div class="lrow" style="font-size:12.5px"><span class="muted">${i + 1}</span> <b>${esc(r.team || r.name)}</b><span style="margin-left:auto" class="gold">${r.pts}</span></div>`).join('')}
+      ${myPos > 4 ? `<div class="lrow" style="font-size:12.5px;border-top:1px dashed var(--line)"><span class="muted">${myPos}</span> <b>${esc(teamName(mid))}</b><span style="margin-left:auto" class="gold">${table[myPos - 1].pts}</span></div>` : ''}
+    </div>
+  </div>`;
+}
+function bindDash() {
+  document.querySelectorAll('[data-goto]').forEach(b => b.onclick = () => { state.view = b.dataset.goto; save(); render(); });
+  document.querySelectorAll('[data-mu]').forEach(el => el.onclick = () => {
+    const [a, b, i] = el.dataset.mu.split(':').map(Number);
+    showMatchup(a, b, i);
+  });
 }
 
 /* ----- playoffs (GW34 semis, GW35–36 two-legged final) ----- */
