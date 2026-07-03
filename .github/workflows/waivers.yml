@@ -1,0 +1,23 @@
+name: Process waivers
+
+on:
+  schedule:
+    - cron: '2 10 * * 2,5'   # Tue & Fri 10:02 UTC — the league's processing time
+  workflow_dispatch:
+
+concurrency:
+  group: waiver-run
+  cancel-in-progress: false
+
+jobs:
+  waivers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install puppeteer
+        run: npm install puppeteer@23
+      - name: Run waivers through the live app
+        run: node scripts/run_waivers.js
