@@ -371,3 +371,13 @@ input:focus, select:focus { border-color: var(--accent-dim); }
 .form-W { background: #2e9e5b; }
 .form-L { background: #d64545; }
 .form-D { background: #8a8f98; }
+
+/* injury / suspension flags: red = out (injured, suspended, unavailable), amber = doubt */
+.pitch-chip.st-red { box-shadow: 0 0 0 2px #e05555; }
+.pitch-chip.st-amber { box-shadow: 0 0 0 2px #e0a83c; }
+.pitch-chip.st-red .pitch-name, .squad-row.st-red .pname { color: #ff9c9c; }
+tr.st-red td { background: rgba(224, 85, 85, .08); }
+tr.st-amber td { background: rgba(224, 168, 60, .06); }
+tr.st-red .pname { color: #ff9c9c; }
+.squad-row.st-red { box-shadow: inset 3px 0 0 #e05555; background: rgba(224, 85, 85, .06); }
+.squad-row.st-amber { box-shadow: inset 3px 0 0 #e0a83c; background: rgba(224, 168, 60, .05); }

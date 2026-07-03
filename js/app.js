@@ -452,6 +452,8 @@ function liveWinProb(a, b, i) {
 const STATUS_ICON = { d: '⚠️', i: '🏥', s: '🟥', u: '🚫', n: '🚫' };
 const statusChip = p => STATUS_ICON[p.status]
   ? `<span class="status-chip" title="${esc(p.news || 'Unavailable')}">${STATUS_ICON[p.status]}</span>` : '';
+// red ring/tint for the crocked and banned, amber for doubts — used on chips and table rows
+const statusClass = p => p.status === 'a' ? '' : p.status === 'd' ? 'st-amber' : 'st-red';
 function toast(msg) {
   const el = $('#toast') || document.body.appendChild(Object.assign(document.createElement('div'), { id: 'toast' }));
   el.textContent = msg;
@@ -1867,7 +1869,7 @@ function poolTable() {
     </tr></thead>
     <tbody>
       ${rows.map(p => `
-      <tr>
+      <tr class="${statusClass(p)}">
         <td><div class="pcell">${photoImg(p)}<div><div class="pname">${esc(p.name)}</div><div class="pclub">${esc(p.full)}</div></div></div></td>
         <td class="muted" style="white-space:nowrap">${flagImg(p.team)} ${esc(p.club)}</td>
         <td><span class="pos-badge pos-${p.pos}">${p.pos}</span></td>
@@ -2050,7 +2052,7 @@ function viewTeam() {
       const oppMid = pair[0] === mid ? pair[1] : pair[0];
       const oxi = lineupFor(oppMid, gw);
       return `<div class="mu-grid" style="margin-bottom:10px"><div class="mu-side"><h3 style="text-align:center">${esc(teamName(oppMid))} <b class="gold">${gwHasStarted(gw) ? gwManagerPoints(oppMid, gw) : projectedGwScore(oppMid, gw)}</b></h3>
-        <div class="pitch mu-pitch">${['GK', 'DF', 'MF', 'FW'].map(pos => `<div class="pitch-row">${oxi.map(pid => PLAYER_BY_ID[pid]).filter(p => p.pos === pos).map(p => `<div class="pitch-chip mu-chip" data-pcard="${p.id}">${kitImg(p.team, p.pos === 'GK')}<span class="pitch-name">${esc(p.name)}</span></div>`).join('')}</div>`).join('')}</div>
+        <div class="pitch mu-pitch">${['GK', 'DF', 'MF', 'FW'].map(pos => `<div class="pitch-row">${oxi.map(pid => PLAYER_BY_ID[pid]).filter(p => p.pos === pos).map(p => `<div class="pitch-chip mu-chip ${statusClass(p)}" data-pcard="${p.id}">${kitImg(p.team, p.pos === 'GK')}<span class="pitch-name">${esc(p.name)}</span></div>`).join('')}</div>`).join('')}</div>
       </div><div class="mu-side"><h3 style="text-align:center">${esc(teamName(mid))} <b class="gold">${gwHasStarted(gw) ? gwManagerPoints(mid, gw) : projectedGwScore(mid, gw)}</b></h3><p class="muted" style="font-size:11px;text-align:center">Your pitch is below — this is who you're up against.</p></div></div>`;
     })()}
     ${(() => {
@@ -2058,14 +2060,16 @@ function viewTeam() {
       // your own team: the NAME opens the card, the chip itself swaps.
       const browsing = !demoMode && whoami && whoami !== -1 && mid !== whoami;
       const chipAttrs = p => browsing ? `data-pcard="${p.id}" style="cursor:pointer"` : `data-pitch="${p.id}" draggable="${!locked}"`;
-      const nameSpan = p => `<span class="pitch-name" ${browsing ? '' : `data-pcard="${p.id}" title="Tap name for stats"`}>${esc(p.name)}</span>`;
+      // pic AND name open the player card everywhere; mid-swap taps still complete the swap
+      const nameSpan = p => `<span class="pitch-name" ${browsing ? '' : `data-pcard="${p.id}" title="Tap for stats"`}>${esc(p.name)}</span>`;
+      const pic = p => browsing ? kitImg(p.team, p.pos === 'GK') : kitImg(p.team, p.pos === 'GK', p);
       return `
     <div class="pitch">
       ${['GK', 'DF', 'MF', 'FW'].map(pos => `
         <div class="pitch-row">
           ${xi.map(pid => PLAYER_BY_ID[pid]).filter(p => p.pos === pos).map(p => `
-            <div class="pitch-chip ${teamView.pitchSel === p.id ? 'sel' : ''}" ${chipAttrs(p)}>
-              ${kitImg(p.team, p.pos === 'GK')}
+            <div class="pitch-chip ${statusClass(p)} ${teamView.pitchSel === p.id ? 'sel' : ''}" ${chipAttrs(p)}>
+              ${pic(p)}
               ${nameSpan(p)}
               ${!gwIsOver(gw) ? `<span class="pitch-vs">${esc(nextOpp(p.team, GAMEWEEKS[gw].n) || '—')}</span>` : `<span class="pitch-vs">${gwPlayerPoints(p.id, gw)} pts</span>`}
             </div>`).join('') || '<span class="muted" style="font-size:11px">—</span>'}
@@ -2074,9 +2078,9 @@ function viewTeam() {
     <div class="bench-strip">
       <span class="muted" style="font-size:11px;font-weight:700;align-self:center">BENCH</span>
       ${benchFor(mid, gw).map((p, k) => `
-        <div class="pitch-chip benched ${teamView.pitchSel === p.id ? 'sel' : ''}" ${chipAttrs(p)} title="Auto-sub priority ${k + 1} — leftmost comes on first">
+        <div class="pitch-chip benched ${statusClass(p)} ${teamView.pitchSel === p.id ? 'sel' : ''}" ${chipAttrs(p)} title="Auto-sub priority ${k + 1} — leftmost comes on first">
           <span class="tag" style="font-size:9px;padding:1px 5px">${k + 1}</span>
-          ${kitImg(p.team, p.pos === 'GK')}
+          ${pic(p)}
           ${nameSpan(p)}
         </div>`).join('')}
     </div>`;
@@ -2093,7 +2097,7 @@ function viewTeam() {
         ${squad.filter(p => p.pos === pos).map(p => {
           const starting = xi.includes(p.id);
           const pts = gwPlayerPoints(p.id, gw);
-          return `<div class="squad-row lineup-row ${starting ? 'starting' : 'benched'}" data-toggle="${p.id}" ${locked ? '' : 'style="cursor:pointer"'}>
+          return `<div class="squad-row lineup-row ${statusClass(p)} ${starting ? 'starting' : 'benched'}" data-toggle="${p.id}" ${locked ? '' : 'style="cursor:pointer"'}>
             <span class="shirt-no" data-num="${p.id}" title="Click to assign a squad number">${shirtNum(mid, p.id)}</span>
             <span class="pos-badge pos-${p.pos}">${p.pos}</span>${kitImg(p.team, p.pos === 'GK', p)}
             <span><span data-pcard="${p.id}" style="cursor:pointer" title="Tap for stats">${esc(p.name)}</span> ${statusChip(p)}</span>
@@ -2508,7 +2512,7 @@ function bindTransfers() {
           const action = ownerMid
             ? (ownerMid === mid ? '<span class="muted" style="font-size:11px">yours</span>' : `<button class="btn ghost small" data-trtrade="${ownerMid}:${p.id}" title="Open the trade desk with ${esc(managerName(ownerMid))}">Trade</button>`)
             : `<button class="btn small ${waiv || locked ? 'ghost' : ''}" data-trin="${p.id}" data-waiv="${waiv ? 1 : 0}" ${ok ? '' : `disabled title="${why}"`}>${locked ? '&#128274;' : waiv ? 'Claim' : 'Sign'}</button>`;
-          return `<tr>
+          return `<tr class="${statusClass(p)}">
             <td><div class="pcell">${photoImg(p)}<div><div class="pname">${esc(p.name)}</div><div class="pclub">${flagImg(p.team)} ${esc(p.club)} · <span class="pos-badge pos-${p.pos}">${p.pos}</span>${ownerMid ? ` · <b style="color:var(--text)">${esc(teamName(ownerMid))}</b>${onBlock(p.id) ? ' · <span style="color:var(--accent)">&#128276; on the block</span>' : ''}` : locked ? ' · <span class="muted">&#128274; new arrival</span>' : waiv ? ' · <span class="muted">on waivers</span>' : ''}</div></div></div></td>
             <td>${statusChip(p)}</td>
             ${cols.map(c => `<td class="num${c.cls || ''}">${c.v(m, p)}</td>`).join('')}
@@ -3555,12 +3559,23 @@ function showPlayerCard(pid) {
         toast(listed ? `${p.name} quietly delisted.` : `${p.name} is on the block. Offers invited.`);
       }, true);
     }
+    // from your own pitch view: start a swap from the card, finish it with a tap
+    if (owner && state.view === 'team' && owner.id === teamView.mid && canActFor(owner.id) && (demoMode || !gwHasStarted(teamView.gw))) {
+      btn('&#8646; Swap / move him', () => {
+        ov.remove();
+        teamView.pitchSel = pid;
+        render();
+        toast('Now tap the teammate to swap with');
+      }, true);
+    }
   }
 }
 // any player photo/kit anywhere opens the card (capture phase beats row handlers)
 document.addEventListener('click', e => {
   const t = e.target.closest?.('[data-pcard]');
   if (!t) return;
+  // mid-swap on your own pitch: the tap completes the swap instead of opening the card
+  if (state.view === 'team' && teamView.pitchSel != null && e.target.closest?.('[data-pitch]')) return;
   e.preventDefault();
   e.stopPropagation();
   showPlayerCard(+t.dataset.pcard);
