@@ -332,3 +332,19 @@ input:focus, select:focus { border-color: var(--accent-dim); }
 .pitch-name { font-size: 10.5px; font-weight: 700; text-shadow: 0 1px 2px #000a; text-align: center; }
 .venue-line { font-size: 10px; color: var(--muted); text-align: center; margin: -2px 0 6px; font-style: italic; }
 .preview-note.chant { font-style: italic; opacity: .85; }
+
+/* pitch v2 — big enough to read a formation off it */
+.pitch {
+  min-height: 480px;
+  justify-content: space-between;
+  padding: 26px 10px;
+  background:
+    radial-gradient(circle at 50% 50%, transparent 56px, #ffffff22 57px, #ffffff22 59px, transparent 60px),
+    linear-gradient(180deg, transparent calc(50% - 1px), #ffffff22 calc(50% - 1px), #ffffff22 calc(50% + 1px), transparent calc(50% + 1px)),
+    linear-gradient(180deg, #14532d, #166534),
+    repeating-linear-gradient(180deg, #ffffff08 0 48px, transparent 48px 96px);
+}
+.pitch-row { flex: 1; align-items: center; }
+.pitch-chip { min-width: 84px; padding: 8px 10px; }
+.pitch-chip .kit { width: 44px; height: 56px; }
+.pitch-name { font-size: 12px; }
