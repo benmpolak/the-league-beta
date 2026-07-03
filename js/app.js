@@ -402,6 +402,44 @@ const projectedGwScore = (mid, gwIdx) =>
   Math.round(lineupFor(mid, gwIdx).reduce((t, pid) => t + playerXp(PLAYER_BY_ID[pid]), 0));
 // win chance from the projected-score gap (logistic; ~12-point gap ≈ 70%)
 const winChance = (sa, sb) => 1 / (1 + Math.pow(10, -(sa - sb) / 25));
+
+/* ----- live win probability -----
+   Each player still to play contributes expected points plus uncertainty;
+   as fixtures run, uncertainty drains and banked points take over.
+   Even teams before kickoff = exactly 50:50; final whistle = 100:0. */
+const PLAYER_SD = 4; // one player's gameweek points spread
+function playerFixtureState(p, gwN) {
+  const f = state.fixtures.find(f => f.gw === gwN && (f.home === p.team || f.away === p.team));
+  if (!f) return { st: 'none', frac: 0 };
+  if (f.finished) return { st: 'done', frac: 0 };
+  if (f.started) return { st: 'live', frac: Math.max(0, (90 - Math.min(90, f.minutes || 0)) / 90) };
+  return { st: 'pre', frac: 1 };
+}
+function teamOutlook(mid, i) {
+  const gwN = GAMEWEEKS[i].n;
+  let exp = 0, varsum = 0, toPlay = 0;
+  for (const pid of effectiveXI(mid, i).xi) {
+    const p = PLAYER_BY_ID[pid];
+    const cur = gwPlayerPoints(pid, i);
+    const fs = playerFixtureState(p, gwN);
+    exp += cur + playerXp(p) * fs.frac;
+    varsum += PLAYER_SD * PLAYER_SD * fs.frac;
+    if (fs.frac > 0) toPlay++;
+  }
+  return { exp, varsum, toPlay };
+}
+function liveWinProb(a, b, i) {
+  const A = teamOutlook(a, i), B = teamOutlook(b, i);
+  const diff = A.exp - B.exp;
+  const sigma = Math.sqrt(A.varsum + B.varsum);
+  if (sigma < 0.5) return diff > 0 ? 1 : diff < 0 ? 0 : 0.5;
+  const z = diff / sigma;
+  // Φ(z), Abramowitz–Stegun
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989423 * Math.exp(-z * z / 2);
+  let p = d * t * (0.3194815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return z > 0 ? 1 - p : p;
+}
 // injury/availability chip from the FPL status flag
 const STATUS_ICON = { d: '⚠️', i: '🏥', s: '🟥', u: '🚫', n: '🚫' };
 const statusChip = p => STATUS_ICON[p.status]
@@ -2218,7 +2256,7 @@ function viewDash() {
   const started = gwHasStarted(cur);
   const my = started ? gwManagerPoints(mid, cur) : projectedGwScore(mid, cur);
   const their = opp ? (started ? gwManagerPoints(opp, cur) : projectedGwScore(opp, cur)) : 0;
-  const pct = opp ? Math.round(winChance(my, their) * 100) : null;
+  const pct = pair ? Math.round(liveWinProb(pair[0], pair[1], cur) * 100) : null;
   const flags = squadAt(mid, cur).filter(p => p.status && p.status !== 'a');
   const offersIn = toArr(state.trades).filter(t => t.status === 'pending' && t.to === mid);
   const myCl = myClaims(mid);
@@ -2237,7 +2275,7 @@ function viewDash() {
         <span class="fx-score">${started ? gwManagerPoints(pair[0], cur) : projectedGwScore(pair[0], cur)} &ndash; ${started ? gwManagerPoints(pair[1], cur) : projectedGwScore(pair[1], cur)}</span>
         <span style="flex:1"><b>${esc(teamName(pair[1]))}</b></span>
       </div>
-      <div class="venue-line">at ${esc(stadium(pair[0]))} &middot; ${started ? (gwStatus(cur) === 'final' ? 'full time' : 'in play — tap for the matchup') : `projected &middot; you're ${pct >= 50 ? '' : 'only '}${mid === pair[0] ? pct : 100 - pct}% to win it`}</div>
+      <div class="venue-line">at ${esc(stadium(pair[0]))} &middot; ${gwStatus(cur) === 'final' ? 'full time' : `${started ? 'in play' : 'projected'} &middot; you're ${(mid === pair[0] ? pct : 100 - pct) >= 50 ? '' : 'only '}${mid === pair[0] ? pct : 100 - pct}% to win it`}</div>
       <div class="preview-note chant">${esc(chantFor(pair[0], pair[1], cur))}</div>` : '<p class="muted">No fixture this week — playoffs or the off-season.</p>'}
       <p class="muted" style="font-size:12px;margin-top:10px">${started ? 'Lineups are locked.' : `Lineup locks ${deadline.toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}.`} You sit <b style="color:var(--text)">${myPos}${['th','st','nd','rd'][((myPos%100>10&&myPos%100<14)?0:Math.min(myPos%10,4))] || 'th'}</b>.</p>
       <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
@@ -2352,7 +2390,7 @@ function showMatchup(a, b, i) {
         <button class="btn small ${muView === 'pitch' ? '' : 'ghost'}" id="muPitch">Pitch</button>
         <button class="btn small ${muView === 'table' ? '' : 'ghost'}" id="muTable">Table</button>
       </div>
-      <p class="venue-line" style="flex:1;margin:0">GW${GAMEWEEKS[i].n} &middot; at ${esc(stadium(a))} &middot; ${started ? (gwStatus(i) === 'final' ? 'full time' : 'in play') : 'projected'}</p>
+      <p class="venue-line" style="flex:1;margin:0">GW${GAMEWEEKS[i].n} &middot; at ${esc(stadium(a))} &middot; ${gwStatus(i) === 'final' ? 'full time' : `${started ? 'in play' : 'projected'} &middot; ${Math.round(liveWinProb(a, b, i) * 100)}% – ${100 - Math.round(liveWinProb(a, b, i) * 100)}%`}</p>
       <button class="btn ghost small" id="muClose">&#10005;</button>
     </div>
     <div class="mu-grid">${side(a)}${side(b)}</div>
@@ -2443,7 +2481,7 @@ function gwPreviewCard(i) {
   const ord = n => n + (['th', 'st', 'nd', 'rd'][(n % 100 > 10 && n % 100 < 14) ? 0 : Math.min(n % 10, 4) === 1 ? 1 : n % 10 === 2 ? 2 : n % 10 === 3 ? 3 : 0]);
   const rows = pairs.map(([a, b]) => {
     const sa = projectedGwScore(a, i), sb = projectedGwScore(b, i);
-    return { a, b, sa, sb, p: winChance(sa, sb), riv: rivalryFor(a, b, i) };
+    return { a, b, sa, sb, p: liveWinProb(a, b, i), riv: rivalryFor(a, b, i) };
   });
   // matchup of the week: a rivalry if one is on, else the tightest projection
   const motw = [...rows].sort((x, y) => (y.riv ? 1 : 0) - (x.riv ? 1 : 0) || Math.abs(x.sa - x.sb) - Math.abs(y.sa - y.sb))[0];
@@ -2556,7 +2594,11 @@ function viewH2H() {
           <span class="fx-score">${pa} &ndash; ${pb}</span>
           <span class="${bWin ? 'h2h-win' : ''}" style="flex:1">${esc(teamName(b))}</span>
         </div>
-        <div class="venue-line">${esc(stadium(a))}</div>`;
+        <div class="venue-line">${esc(stadium(a))}${st === 'live' || st === 'underway' ? (() => {
+          const w = Math.round(liveWinProb(a, b, i) * 100);
+          const ta = teamOutlook(a, i), tb = teamOutlook(b, i);
+          return ` &middot; win chance ${w}% – ${100 - w}% &middot; ${ta.toPlay} v ${tb.toPlay} still to play`;
+        })() : ''}</div>`;
       }).join('')}
       <h3 style="margin-top:14px">GW${g.n} — the real fixtures</h3>
       ${(() => {
