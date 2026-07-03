@@ -114,7 +114,8 @@ function pairingsFor(i) {
   const line = [o[0], ...rot];
   const pairs = [];
   for (let k = 0; k < Math.floor(n / 2); k++) pairs.push([line[k], line[n - 1 - k]]);
-  return pairs;
+  // first team = home; alternate by round so the three meetings split 2-1
+  return i % 2 ? pairs.map(([a, b]) => [b, a]) : pairs;
 }
 
 /* ---------------- state ---------------- */
@@ -379,6 +380,7 @@ function normName(s) {
 }
 function managerName(mid) { return state.managers.find(m => m.id === mid)?.name || `Manager ${mid}`; }
 function teamName(mid) { const m = state.managers.find(m => m.id === mid); return m?.team || m?.name || `Manager ${mid}`; }
+function stadium(mid) { const m = state.managers.find(m => m.id === mid); return m?.stadium || `${teamName(mid)} Park`; }
 
 /* ---------------- rosters (draft + transfers) ---------------- */
 function squadAt(mid, gwIdx) {
@@ -1684,6 +1686,7 @@ function viewTeam() {
     <select id="teamGw">${GAMEWEEKS.map((g, i) => `<option value="${i}" ${i === gw ? 'selected' : ''}>GW${g.n} — ${g.label}${i === cur ? ' (current)' : ''}</option>`).join('')}</select>
     <span class="tag">${locked ? (gwIsOver(gw) ? 'Gameweek finished — locked' : 'Deadline passed — locked') : `Lineup open — locks ${new Date(gwFrom(gw)).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`}</span>
     <span class="tag">GW points: <b class="gold">&nbsp;${gwManagerPoints(mid, gw)}</b></span>
+    <button class="tag" id="stadiumBtn" style="cursor:pointer" title="Rename your stadium">&#127967; ${esc(stadium(mid))}</button>
   </div>
   <div class="draft-layout">
     <div class="card">
@@ -1809,6 +1812,17 @@ function bindTeam() {
       save(); render();
     });
   }
+  // --- stadium naming ---
+  const sb2 = $('#stadiumBtn');
+  if (sb2) sb2.onclick = () => {
+    if (!canActFor(mid)) { toast(`That's ${managerName(mid)}'s ground, not yours`); return; }
+    const v = prompt(`Name ${teamName(mid)}'s stadium:`, stadium(mid));
+    if (v == null || !v.trim()) return;
+    state.managers.find(m => m.id === mid).stadium = v.trim().slice(0, 40);
+    pushShared('managers', state.managers);
+    save(); render();
+    toast(`${v.trim()} — naming rights sold for nothing.`);
+  };
   // --- the pitch: arrange a line left-to-right by swapping two players ---
   document.querySelectorAll('[data-pitch]').forEach(chip => chip.onclick = () => {
     if (!demoMode && gwHasStarted(gw)) { toast('Lineup is locked for this gameweek'); return; }
@@ -2102,6 +2116,7 @@ function gwPreviewCard(i) {
           <span class="fx-score" title="projected score">${r.sa} &ndash; ${r.sb}</span>
           <span style="flex:1"><b class="pct">${100 - pct}%</b> ${esc(teamName(r.b))}</span>
         </div>
+        <div class="venue-line">at ${esc(stadium(r.a))}</div>
         ${notes(r).map(n => `<div class="preview-note">${esc(n)}</div>`).join('')}
       </div>`;
     }).join('')}
@@ -2159,10 +2174,11 @@ function viewH2H() {
         const pb = st === 'upcoming' ? '–' : gwManagerPoints(b, i);
         const aWin = st === 'final' && pa > pb, bWin = st === 'final' && pb > pa;
         return `<div class="h2h-fx">
-          <span class="${aWin ? 'h2h-win' : ''}" style="flex:1;text-align:right">${esc(teamName(a))}</span>
+          <span class="${aWin ? 'h2h-win' : ''}" style="flex:1;text-align:right">${esc(teamName(a))} <span class="muted" style="font-size:10px">(H)</span></span>
           <span class="fx-score">${pa} &ndash; ${pb}</span>
           <span class="${bWin ? 'h2h-win' : ''}" style="flex:1">${esc(teamName(b))}</span>
-        </div>`;
+        </div>
+        <div class="venue-line">${esc(stadium(a))}</div>`;
       }).join('')}
     </div>`;
   }).join('')}`;
