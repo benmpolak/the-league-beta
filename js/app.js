@@ -309,13 +309,30 @@ function buildDemoState() {
   s.lastSync = new Date().toISOString();
   return s;
 }
-function enterDemo() {
+async function enterDemo() {
   if (demoMode) return;
   demoBackup = state;
   demoMode = true;
   state = buildDemoState();
   render();
   toast('Demo mode — fake draft, fake results. Your real league is untouched.');
+  // pull the full real season in, so every feature has something to show
+  try {
+    const bust = `?t=${Date.now()}`;
+    const [stats, fixtures] = await Promise.all([
+      fetch(`data/stats.json${bust}`).then(r => r.json()),
+      fetch(`data/fixtures.json${bust}`).then(r => r.json()),
+    ]);
+    if (!demoMode) return;
+    state.fixtures = fixtures.filter(f => f.date).sort((a, b) => a.date.localeCompare(b.date));
+    for (const [gwN, gw] of Object.entries(stats.gws || {})) {
+      const i = +gwN - 1;
+      if (!GAMEWEEKS[i]) continue;
+      state.matchStats[`gw${gwN}`] = { gw: i, label: GAMEWEEKS[i].label, date: GAMEWEEKS[i].from, final: !!gw.finished, playerStats: gw.stats || {} };
+    }
+    render();
+    toast('Demo loaded a full season of real stats — click around, everything is live.');
+  } catch { /* offline demo still works with its fictional GW1 */ }
 }
 function exitDemo() {
   state = demoBackup || load() || freshState();
@@ -954,8 +971,10 @@ function renderIdentity() {
     <p class="muted" style="font-size:13px;margin-bottom:14px">Actions from this device count for the manager you pick. Choose honestly — the Committee has your number. And your Monzo handle.</p>
     ${state.managers.map((m, i) => `<button class="btn ghost" data-who="${m.id}" style="width:100%;margin-bottom:8px;text-align:left">${esc(m.name)}${i === 0 ? ' <span class="tag">commissioner</span>' : ''}</button>`).join('')}
     <button class="btn ghost" data-who="-1" style="width:100%;opacity:.7">Just watching</button>
+    <button class="btn ghost" id="whoDemo" style="width:100%;opacity:.7">&#127918; Just exploring — show me a demo season</button>
   </div>`;
   document.body.appendChild(ov);
+  ov.querySelector('#whoDemo').onclick = () => { ov.remove(); enterDemo(); };
   ov.querySelectorAll('[data-who]').forEach(b => b.onclick = () => {
     whoami = +b.dataset.who;
     localStorage.setItem(WHO_KEY, whoami);
