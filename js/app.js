@@ -2619,6 +2619,8 @@ document.addEventListener('click', e => {
 
 /* ---------------- boot ---------------- */
 render();
+// ?demo drops visitors straight into the demo season
+if (new URLSearchParams(location.search).has('demo')) enterDemo();
 // commissioner devices run overdue scheduled waivers automatically
 setTimeout(() => {
   if (netOn() && isCommissioner() && waiverRunDue()) processWaivers(false);
