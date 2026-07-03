@@ -472,7 +472,28 @@ function normName(s) {
 }
 function managerName(mid) { return state.managers.find(m => m.id === mid)?.name || `Manager ${mid}`; }
 function teamName(mid) { const m = state.managers.find(m => m.id === mid); return m?.team || m?.name || `Manager ${mid}`; }
-function stadium(mid) { const m = state.managers.find(m => m.id === mid); return m?.stadium || `${teamName(mid)} Park`; }
+// default grounds, until the owner sells the naming rights (tap the stadium name on My Team)
+const DEFAULT_STADIA = {
+  1: 'The Kennel',                                // The Dog's Polaks
+  2: 'The Great Hall of the People',              // Chairman Mao *°
+  3: 'El Benfield Metropolitano',                 // Atlético Benfield
+  4: 'Stadio Giuseppe Jackson',                   // Interjacksonale*
+  5: 'The Khusanova Arena (naming rights disputed)', // Champagne Khusanova FC
+  6: 'The Hot Gates',                             // Singer's Spartans
+  7: 'The Asterisk Bowl*',                        // Asterick
+  8: 'The Motherboard',                           // 101011101
+  9: 'The Pond',                                  // Mighty 🦆 *
+  10: 'Balaídos-upon-Leigh',                      // Celta Leigh-Go
+  11: 'The Dog Track',                            // Geldog FC
+  12: 'The WACA',                                 // WA Wanderers
+};
+function stadium(mid) { const m = state.managers.find(m => m.id === mid); return m?.stadium || DEFAULT_STADIA[mid] || `${teamName(mid)} Park`; }
+// matchday attendance: deterministic per fixture, so every device reports the same crowd
+function attendance(a, b, i) {
+  let s = a * 7919 + b * 104729 + i * 1299709;
+  s = (s * 1103515245 + 12345) % 2147483648;
+  return 8000 + (s % 34000);
+}
 
 /* ---------------- rosters (draft + transfers) ---------------- */
 function squadAt(mid, gwIdx) {
@@ -2995,7 +3016,7 @@ function showMatchup(a, b, i) {
         <button class="btn small ${muView === 'pitch' ? '' : 'ghost'}" id="muPitch">Pitch</button>
         <button class="btn small ${muView === 'table' ? '' : 'ghost'}" id="muTable">Table</button>
       </div>
-      <p class="venue-line" style="flex:1;margin:0">GW${GAMEWEEKS[i].n} &middot; at ${esc(stadium(a))} &middot; ${gwStatus(i) === 'final' ? 'full time' : `${started ? 'in play' : 'projected'} &middot; ${Math.round(liveWinProb(a, b, i) * 100)}% – ${100 - Math.round(liveWinProb(a, b, i) * 100)}%`}</p>
+      <p class="venue-line" style="flex:1;margin:0">GW${GAMEWEEKS[i].n} &middot; at ${esc(stadium(a))} &middot; Att ${attendance(a, b, i).toLocaleString()} &middot; ${gwStatus(i) === 'final' ? 'full time' : `${started ? 'in play' : 'projected'} &middot; ${Math.round(liveWinProb(a, b, i) * 100)}% – ${100 - Math.round(liveWinProb(a, b, i) * 100)}%`}</p>
       <button class="btn ghost small" id="muClose">&#10005;</button>
     </div>
     <div class="mu-grid">${side(a)}${side(b)}</div>
@@ -3505,7 +3526,8 @@ function bindSettings() {
     if (confirm('Wipe the league, draft and all scores — for EVERYONE?')) {
       state = freshState();
       localStorage.removeItem('tl2627-ceremony-seen');
-      if (netOn()) window.WCSync.setRoot(null);
+      // rules only allow deleting a league that is back in setup — flip, then wipe
+      if (netOn()) window.WCSync.set('phase', 'setup').then(() => window.WCSync.setRoot(null)).catch(e => console.warn('[sync] wipe failed', e));
       save(); render();
     }
   };

@@ -5,7 +5,7 @@
     "leagues": {
       "$league": {
         ".read": true,
-        ".write": true
+        ".write": "newData.exists() || !data.exists() || data.child('phase').val() === 'setup'"
       }
     }
   }
