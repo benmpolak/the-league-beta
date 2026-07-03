@@ -367,3 +367,7 @@ input:focus, select:focus { border-color: var(--accent-dim); }
 .mu-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .mu-card { max-width: 760px; }
 @media (max-width: 700px) { .mu-grid { grid-template-columns: 1fr; } }
+.form-pill { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 6px; font-size: 11px; font-weight: 800; margin-right: 3px; color: #fff; }
+.form-W { background: #2e9e5b; }
+.form-L { background: #d64545; }
+.form-D { background: #8a8f98; }

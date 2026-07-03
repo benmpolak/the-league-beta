@@ -1879,12 +1879,24 @@ function viewTeam() {
         <button class="btn small" id="goTransfers">Open Transfers</button>
       </div>
       <div class="card">
-        <h2>Gameweek points</h2>
-        ${GAMEWEEKS.map((g, i) => {
-          const st = gwStatus(i);
-          if (st === 'upcoming') return '';
-          return `<div class="lrow" style="justify-content:space-between"><span>GW${g.n} ${g.label} ${st !== 'final' ? '<span class="rec" style="display:inline-block"></span>' : ''}</span><b>${gwManagerPoints(mid, i)}</b></div>`;
-        }).join('') || '<span class="muted">Nothing played yet.</span>'}
+        <h2>Form</h2>
+        ${(() => {
+          const rows = [];
+          for (let i = 0; i < REGULAR_GWS; i++) {
+            if (gwStatus(i) !== 'final') continue;
+            const pr = pairingsFor(i).find(x => x.includes(mid));
+            if (!pr) continue;
+            const op = pr[0] === mid ? pr[1] : pr[0];
+            const pm = gwManagerPoints(mid, i), po = gwManagerPoints(op, i);
+            rows.push({ i, op, pm, po, res: pm > po ? 'W' : pm < po ? 'L' : 'D' });
+          }
+          if (!rows.length) return '<span class="muted" style="font-size:12.5px">No results yet. All to play for.</span>';
+          const strip = rows.slice(-8).map(r => `<span class="form-pill form-${r.res}" title="GW${GAMEWEEKS[r.i].n}">${r.res}</span>`).join('');
+          const season = rows.reduce((t, r) => t + r.pm, 0);
+          return `<div style="margin-bottom:10px">${strip}</div>` +
+            rows.slice(-6).reverse().map(r => `<div class="lrow" style="font-size:12.5px;justify-content:space-between"><span><span class="form-pill form-${r.res}">${r.res}</span> GW${GAMEWEEKS[r.i].n} v ${esc(teamName(r.op))}</span><b>${r.pm}&ndash;${r.po}</b></div>`).join('') +
+            `<p class="muted" style="font-size:11.5px;margin-top:8px">Season points: <b style="color:var(--text)">${managerPoints(mid)}</b> &middot; H2H scoring: ${season}</p>`;
+        })()}
       </div>
     </div>
   </div>`;
