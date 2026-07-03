@@ -142,7 +142,7 @@ function actGuard(mid, what = 'team') {
   return true;
 }
 
-const SHARED_KEYS = ['phase', 'managers', 'settings', 'draft', 'lineups', 'transfers', 'trades', 'covenants', 'claims', 'waiverMeta', 'autolists', 'pins', 'adjustments', 'shirtNums', 'draftPool', 'windowDraft', 'tradeBlock'];
+const SHARED_KEYS = ['phase', 'managers', 'settings', 'draft', 'lineups', 'transfers', 'trades', 'covenants', 'claims', 'waiverMeta', 'autolists', 'pins', 'adjustments', 'shirtNums', 'draftPool', 'windowDraft', 'tradeBlock', 'benchOrders'];
 function sharedSnapshot() {
   const o = {};
   for (const k of SHARED_KEYS) o[k] = state[k];
@@ -254,6 +254,7 @@ function freshState() {
     draftPool: null,       // draft-night snapshot {at, ids: {pid: club}} — anyone outside it is a locked "new arrival"
     windowDraft: null,     // {status: live|done, order, turn, passes, picks} — post-window mini-draft of arrivals
     tradeBlock: {},        // managerId -> [pid] players publicly listed as available to trade
+    benchOrders: {},       // managerId -> { gwIndex: [pid] } — auto-sub priority, leftmost first
     fixtures: [],
     matchStats: {},        // 'gw{n}' -> { gw, label, date, final, playerStats: {pid:{min,st,sub,g,a,cs,gc,og,ps,pm,yc,rc,sv}} }
     adjustments: {},
@@ -370,6 +371,7 @@ function load() {
     if (s && s.draftPool === undefined) s.draftPool = null;
     if (s && s.windowDraft === undefined) s.windowDraft = null;
     if (s && !s.tradeBlock) s.tradeBlock = {};
+    if (s && !s.benchOrders) s.benchOrders = {};
     if (s && s.settings.pickTimer == null) s.settings.pickTimer = 30;
     if (s && !s.settings.posMin) s.settings.posMin = { GK: 1, DF: 3, MF: 3, FW: 1 };
     if (s && !s.settings.posMax) s.settings.posMax = { GK: 2, DF: 6, MF: 6, FW: 4 };
@@ -858,6 +860,25 @@ function appearedInGw(pid, gwIdx) {
   const s = gwEvent(gwIdx)?.playerStats?.[pid];
   return !!(s && (s.min || s.st || s.sub));
 }
+// the bench in priority order: stored order first (carried forward like lineups),
+// anyone unlisted appended by rating. Leftmost comes on first — Draft Fantasy style.
+function benchFor(mid, gwIdx) {
+  const xi = new Set(lineupFor(mid, gwIdx));
+  const squad = squadAt(mid, gwIdx).filter(p => !xi.has(p.id));
+  const stored = state.benchOrders?.[mid] || {};
+  let ord = stored[gwIdx];
+  if (!ord) for (let j = gwIdx - 1; j >= 0; j--) { if (stored[j]) { ord = stored[j]; break; } }
+  ord = toArr(ord);
+  const byId = Object.fromEntries(squad.map(p => [p.id, p]));
+  const out = ord.filter(id => byId[id]).map(id => byId[id]);
+  for (const p of [...squad].sort((a, b) => rating(b) - rating(a))) if (!out.includes(p)) out.push(p);
+  return out;
+}
+function setBenchOrder(mid, gwIdx, pids) {
+  (state.benchOrders = state.benchOrders || {})[mid] = state.benchOrders[mid] || {};
+  state.benchOrders[mid][gwIdx] = pids;
+  pushShared(`benchOrders/${mid}/${gwIdx}`, pids);
+}
 // auto-subs: starters who never played are replaced by bench players who did,
 // best-rated first, keeping the XI shape legal
 function effectiveXI(mid, gwIdx) {
@@ -865,9 +886,7 @@ function effectiveXI(mid, gwIdx) {
   const ev = gwEvent(gwIdx);
   const anySynced = !!ev && Object.keys(ev.playerStats || {}).length > 0;
   if (!anySynced) return { xi, subs: [] };
-  const squad = squadAt(mid, gwIdx);
-  const bench = squad.filter(p => !xi.includes(p.id) && appearedInGw(p.id, gwIdx))
-    .sort((a, b) => rating(b) - rating(a));
+  const bench = benchFor(mid, gwIdx).filter(p => appearedInGw(p.id, gwIdx)); // manager's order, leftmost first
   const subs = [];
   for (const pid of [...xi]) {
     if (appearedInGw(pid, gwIdx)) continue;
@@ -2047,13 +2066,14 @@ function viewTeam() {
     </div>
     <div class="bench-strip">
       <span class="muted" style="font-size:11px;font-weight:700;align-self:center">BENCH</span>
-      ${squad.filter(p => !xi.includes(p.id)).map(p => `
-        <div class="pitch-chip benched ${teamView.pitchSel === p.id ? 'sel' : ''}" data-pitch="${p.id}" draggable="${!locked}">
+      ${benchFor(mid, gw).map((p, k) => `
+        <div class="pitch-chip benched ${teamView.pitchSel === p.id ? 'sel' : ''}" data-pitch="${p.id}" draggable="${!locked}" title="Auto-sub priority ${k + 1} — leftmost comes on first">
+          <span class="tag" style="font-size:9px;padding:1px 5px">${k + 1}</span>
           ${kitImg(p.team, p.pos === 'GK')}
           <span class="pitch-name">${esc(p.name)}</span>
         </div>`).join('')}
     </div>
-    <p class="muted" style="font-size:11px;margin-top:6px">Drag (or tap two players) to swap — within a line to arrange it, bench onto pitch to make a substitution.</p>
+    <p class="muted" style="font-size:11px;margin-top:6px">Drag (or tap two players) to swap — within a line to arrange it, bench onto pitch to substitute, <b>two bench players to set auto-sub order</b> (leftmost comes on first).</p>
   </div>
   <div class="draft-layout">
     <div class="card">
@@ -2158,8 +2178,19 @@ function bindTeam() {
       trial[inIdx] = offPid;
       if (!xiValid(trial)) { toast('That substitution breaks the XI shape (1 GK, 3–5 DF, 2–5 MF, 1–3 FW)'); return; }
       xi2[inIdx] = offPid;
-      void onPid;
-    } else return; // two bench players — nothing to do
+      // the departing starter inherits the incoming sub's bench slot
+      setBenchOrder(mid, gw, benchFor(mid, gw).map(p => p.id === offPid ? onPid : p.id));
+    } else {
+      // two bench players: swap their auto-sub priority
+      const bo = benchFor(mid, gw).map(p => p.id);
+      const ka = bo.indexOf(pidA), kb = bo.indexOf(pidB);
+      if (ka < 0 || kb < 0) return;
+      [bo[ka], bo[kb]] = [bo[kb], bo[ka]];
+      setBenchOrder(mid, gw, bo);
+      teamView.pitchSel = null;
+      save(); render();
+      return;
+    }
     (state.lineups[mid] = state.lineups[mid] || {})[gw] = xi2;
     pushShared(`lineups/${mid}/${gw}`, xi2);
     teamView.pitchSel = null;
@@ -2710,6 +2741,27 @@ function treatmentRoomCard() {
     <p class="muted" style="font-size:10.5px;margin-top:8px">Injury lines from the official FPL feed (Premier Injuries data), refreshed every 15 minutes. Deep cuts: <a href="https://x.com/BenDinnery" target="_blank" rel="noopener" style="color:var(--accent)">@BenDinnery</a> · <a href="https://x.com/BenCrellin" target="_blank" rel="noopener" style="color:var(--accent)">@BenCrellin</a>.</p>
   </div>`;
 }
+/* ----- points grid: every score, every week — Draft Fantasy's Points tab ----- */
+function pointsGridCard(standings) {
+  const gws = [];
+  for (let i = 0; i < GAMEWEEKS.length; i++) if (gwStatus(i) === 'final' || gwStatus(i) === 'live') gws.push(i);
+  if (!gws.length) return '';
+  const scores = {};
+  for (const r of standings) scores[r.id] = gws.map(i => gwManagerPoints(r.id, i));
+  const hi = gws.map((_, k) => Math.max(...standings.map(r => scores[r.id][k])));
+  return `<div class="card" style="margin-bottom:18px">
+    <h2>Points, week by week <span class="muted" style="font-weight:400;font-size:12px">gold = top score of the week</span></h2>
+    <div style="overflow-x:auto">
+    <table class="pool-table" style="font-size:12px">
+      <thead><tr><th>Team</th>${gws.map(i => `<th class="num" title="${esc(GAMEWEEKS[i].label)}${gwStatus(i) === 'live' ? ' — in play' : ''}">${GAMEWEEKS[i].n}${gwStatus(i) === 'live' ? '&#8226;' : ''}</th>`).join('')}<th class="num">Total</th></tr></thead>
+      <tbody>${standings.map(r => `<tr>
+        <td style="white-space:nowrap"><b>${esc(r.team || r.name)}</b></td>
+        ${gws.map((i, k) => `<td class="num ${scores[r.id][k] === hi[k] && hi[k] > 0 ? 'gold' : 'muted'}">${scores[r.id][k]}</td>`).join('')}
+        <td class="num" style="font-weight:700">${scores[r.id].reduce((t, x) => t + x, 0)}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+  </div>`;
+}
 /* ----- the Crystal Ball: luck, playoff odds, points left on bench ----- */
 function crystalBallCard(standings) {
   const { rows: ap, played } = allPlayTable();
@@ -3041,6 +3093,7 @@ function viewH2H() {
     </table>
     <p class="muted" style="font-size:11px;margin-top:6px">Top four make the playoffs.${liveNow ? ' Live table — includes the gameweek in progress.' : ''}</p>
   </div>
+  ${pointsGridCard(standings)}
   ${crystalBallCard(standings)}
   ${gwPreviewCard(cur)}
   ${playoffCard()}
