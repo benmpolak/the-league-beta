@@ -1,5 +1,7 @@
-// Full World Cup simulation through the real app — draft, 7 gameweeks of results,
-// lineups, waivers, a trade, auto-subs, H2H finals. Runs against ?nosync (no cloud).
+// Full 26/27 season simulation through the real app — snake draft, 33 H2H
+// gameweeks with lineups/bench orders/waivers/trough/trades, the Window Draft,
+// auto-subs, the Monzo Cup, and the GW34–36 playoffs. Runs against ?nosync.
+// Usage: python3 -m http.server 8125 &  then  node test/sim.test.js
 const puppeteer = require('puppeteer-core');
 
 let failures = 0;
@@ -17,30 +19,32 @@ const check = (label, ok, detail = '') => {
   const pageErrors = [];
   p.on('pageerror', e => pageErrors.push(e.message));
   p.on('dialog', d => d.accept());
-  await p.goto('http://localhost:8123?nosync', { waitUntil: 'networkidle2' });
+  await p.goto('http://localhost:8125?nosync', { waitUntil: 'networkidle2' });
 
-  // ---------- 1. start the draft ----------
-  await p.waitForSelector('#startDraft');
-  await p.click('#startDraft');
-  await new Promise(r => setTimeout(r, 400));
-  check('draft starts', await p.evaluate(() => state.phase === 'draft' && state.draft.order.length === 4));
-
-  // ---------- 2. country limit enforced ----------
-  const limitOk = await p.evaluate(() => {
-    const mid = currentManagerId();
-    const max = state.settings.maxPerCountryGroup;
-    const france = PLAYERS.filter(pl => pl.team === 'France').slice(0, max + 1);
-    // fill to the country limit then test one more via canPick
-    state.draft.picks.push(...france.slice(0, max).map((pl, i) => ({ managerId: mid, playerId: pl.id, n: i + 1 })));
-    const blocked = !canPick(mid, france[max]);
-    state.draft.picks = [];
-    return blocked;
-  });
-  check('country limit blocks one-over-the-max from same nation', limitOk);
-
-  // ---------- 3. run the full 60-pick draft (engine path) ----------
+  // ---------- 0. hermetic setup: no background syncs, clean clock ----------
   await p.evaluate(() => {
-    while (state.phase === 'draft') {
+    syncNow = async () => {};
+    state.matchStats = {};
+    state.fixtures = [];
+    for (const g of GAMEWEEKS) g.finished = false;
+    for (const pl of PLAYERS) pl.xp = pl.ppg || 0;
+    Date.now = () => new Date('2025-08-10T12:00Z').getTime(); // before GW1
+    save(); render();
+  });
+  check('setup phase renders', await p.evaluate(() => state.phase === 'setup' && !!document.querySelector('#startDraftOrdered')));
+
+  // ---------- 1. draft: ordered start, engine-run 168 picks ----------
+  await p.evaluate(() => document.querySelector('#startDraftOrdered').click());
+  await new Promise(r => setTimeout(r, 500));
+  check('draft starts with 12 in order', await p.evaluate(() =>
+    state.phase === 'draft' && state.draft.order.length === 12));
+  check('draft-night snapshot taken', await p.evaluate(() =>
+    !!state.draftPool?.ids && Object.keys(state.draftPool.ids).length === PLAYERS.length));
+
+  await p.evaluate(() => {
+    document.querySelectorAll('.overlay').forEach(o => o.remove()); // ceremony etc.
+    let guard = 0;
+    while (state.phase === 'draft' && guard++ < 200) {
       const mid = currentManagerId();
       const taken = draftedIds();
       const best = PLAYERS.filter(pl => !taken.has(pl.id) && canPick(mid, pl))
@@ -48,194 +52,330 @@ const check = (label, ok, detail = '') => {
       state.draft.picks.push({ managerId: mid, playerId: best.id, n: pickNo() + 1 });
       if (pickNo() >= totalPicks()) state.phase = 'season';
     }
+    state.view = 'dash';
     save(); render();
   });
   const draftAudit = await p.evaluate(() => {
-    const out = { squads: [], quotaOk: true, countryOk: true };
+    const sizes = state.managers.map(m => managerSquad(m.id).length);
+    const { posMin, posMax } = state.settings;
+    let shapeOk = true;
     for (const m of state.managers) {
-      const sq = managerSquad(m.id);
-      out.squads.push(sq.length);
-      const c = posCount(m.id), q = state.settings.quotas;
-      for (const pos of ['GK', 'DF', 'MF', 'FW']) if (c[pos] !== q[pos]) out.quotaOk = false;
-      const nat = {};
-      sq.forEach(pl => nat[pl.team] = (nat[pl.team] || 0) + 1);
-      if (Object.values(nat).some(n => n > state.settings.maxPerCountryGroup)) out.countryOk = false;
+      const c = posCount(m.id);
+      for (const pos of ['GK', 'DF', 'MF', 'FW']) if (c[pos] < posMin[pos] || c[pos] > posMax[pos]) shapeOk = false;
     }
-    return out;
+    const owned = new Set(state.draft.picks.map(x => x.playerId));
+    return { sizes, shapeOk, unique: owned.size, phase: state.phase };
   });
-  check('all squads have 23', draftAudit.squads.every(n => n === 23), JSON.stringify(draftAudit.squads));
-  check('position quotas exact (3/7/7/6)', draftAudit.quotaOk);
-  check('country limit respected in full draft', draftAudit.countryOk);
-  check('phase flips to season', await p.evaluate(() => state.phase === 'season'));
+  check('all 12 squads have 14', draftAudit.sizes.every(n => n === 14), JSON.stringify(draftAudit.sizes));
+  check('squad shapes inside min/max', draftAudit.shapeOk);
+  check('168 unique players drafted', draftAudit.unique === 168);
+  check('phase flips to season', draftAudit.phase === 'season');
 
-  // ---------- 4. simulate each gameweek ----------
-  const GW_NOW = ['2026-06-14', '2026-06-20', '2026-06-25', '2026-06-30', '2026-07-05', '2026-07-10', '2026-07-14', '2026-07-18'];
-  for (let gw = 0; gw < 8; gw++) {
-    await p.evaluate((gw, nowStr) => {
-      Date.now = () => new Date(nowStr + 'T12:00Z').getTime();
-      // fabricate results for this GW for all owned players
-      let seed = 1000 + gw;
+  // ---------- 2. the regular season, GW by GW ----------
+  const N_REG = 33;
+  for (let gw = 0; gw < N_REG; gw++) {
+    const res = await p.evaluate(gw => {
+      const out = { checks: {} };
+      // clock: middle of this GW's real window
+      const mid = (new Date(GAMEWEEKS[gw].from).getTime() + new Date(GAMEWEEKS[gw].to).getTime()) / 2;
+      Date.now = () => mid;
+      if (currentGwIndex() !== gw) return { err: `currentGwIndex ${currentGwIndex()} != ${gw}` };
+      let seed = 4242 + gw;
       const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+
+      // a few managers fiddle with lineups + bench order before kickoff
+      for (const m of state.managers.slice(0, 4)) {
+        const xi = lineupFor(m.id, gw);
+        (state.lineups[m.id] = state.lineups[m.id] || {})[gw] = xi;
+        const bo = benchFor(m.id, gw).map(x => x.id);
+        if (bo.length > 1) { const j = 1 + Math.floor(rnd() * (bo.length - 1)); [bo[0], bo[j]] = [bo[j], bo[0]]; setBenchOrder(m.id, gw, bo); }
+      }
+
+      // waiver claims: two managers contest the same top free agent
+      const owned0 = ownedIdsAt(gw);
+      const fa = PLAYERS.filter(x => !owned0.has(x.id) && !arrivalLocked(x)).sort((a, b) => rating(b) - rating(a));
+      const order = waiverOrder(gw); // who SHOULD win a contested claim: earliest in this queue
+      const [hi, lo] = [order[0], order[order.length - 1]];
+      const target = fa.find(x => {
+        const dropHi = [...squadAt(hi, gw)].sort((a, b) => rating(a) - rating(b)).find(d => squadShapeOk([...squadAt(hi, gw).filter(q => q.id !== d.id), x]));
+        const dropLo = [...squadAt(lo, gw)].sort((a, b) => rating(a) - rating(b)).find(d => squadShapeOk([...squadAt(lo, gw).filter(q => q.id !== d.id), x]));
+        return dropHi && dropLo;
+      });
+      let dropHi, dropLo;
+      if (target) {
+        dropHi = [...squadAt(hi, gw)].sort((a, b) => rating(a) - rating(b)).find(d => squadShapeOk([...squadAt(hi, gw).filter(q => q.id !== d.id), target]));
+        dropLo = [...squadAt(lo, gw)].sort((a, b) => rating(a) - rating(b)).find(d => squadShapeOk([...squadAt(lo, gw).filter(q => q.id !== d.id), target]));
+        setClaims(hi, [{ in: target.id, out: dropHi.id }]);
+        setClaims(lo, [{ in: target.id, out: dropLo.id }]);
+      }
+
+      // the football happens: fabricated final stats for ~88% of owned players
       const ps = {};
       for (const m of state.managers) {
         for (const pl of squadAt(m.id, gw)) {
-          if (rnd() < 0.15) continue; // ~15% don't play at all → auto-sub fodder
+          if (rnd() < 0.12) continue; // did not play — auto-sub fodder
           const started = rnd() < 0.85;
-          const gc = { FW: 0.3, MF: 0.18, DF: 0.06, GK: 0.005 }[pl.pos];
+          const gp = { FW: 0.30, MF: 0.16, DF: 0.05, GK: 0.004 }[pl.pos];
           ps[pl.id] = {
-            st: started ? 1 : 0, sub: started ? 0 : 1,
-            g: rnd() < gc ? 1 : 0, a: rnd() < 0.15 ? 1 : 0,
-            cs: (pl.pos === 'GK' || pl.pos === 'DF') && rnd() < 0.35 ? 1 : 0,
+            min: started ? 90 : 25, st: started ? 1 : 0, sub: started ? 0 : 1,
+            g: rnd() < gp ? 1 : 0, a: rnd() < 0.14 ? 1 : 0,
+            cs: rnd() < 0.32 ? 1 : 0, gc: rnd() < 0.5 ? 1 : 0,
+            og: 0, ps: 0, pm: 0, yc: rnd() < 0.12 ? 1 : 0, rc: 0,
+            sv: pl.pos === 'GK' ? Math.floor(rnd() * 6) : 0,
           };
         }
       }
-      const mid = new Date((new Date(gwFrom(gw)).getTime() + new Date(GAMEWEEKS[gw].to).getTime()) / 2).toISOString();
-      state.matchStats['sim' + gw] = { label: `Sim GW${gw + 1}`, date: mid, final: true, playerStats: ps };
-      save(); render();
-    }, gw, GW_NOW[gw]);
+      state.matchStats[`gw${GAMEWEEKS[gw].n}`] = { gw, label: GAMEWEEKS[gw].label, date: GAMEWEEKS[gw].from, final: true, playerStats: ps };
 
-    // trough/waivers: behave per mode (open / redraft / ordered)
-    const waiverResult = await p.evaluate(gw => {
-      const cur = currentGwIndex();
-      if (cur !== gw) return { err: `currentGwIndex ${cur} != ${gw}` };
-      const doSwap = wmid => {
-        const squad = squadAt(wmid, cur);
-        const out = [...squad].sort((a, b) => rating(a) - rating(b))[0];
-        const owned = ownedIdsAt(cur);
-        const after = squad.filter(x => x.id !== out.id);
-        const cand = PLAYERS.filter(x => !owned.has(x.id) && x.pos === out.pos
-          && countryCount(after, x.team) < countryCapNow(cur))
-          .sort((a, b) => rating(b) - rating(a))[0];
-        if (!cand) return false;
-        state.transfers.push({ managerId: wmid, outId: out.id, inId: cand.id, gw: cur, n: state.transfers.length + 1 });
-        (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, outId: out.id, inId: cand.id });
-        const lu = state.lineups[wmid]?.[cur];
-        if (lu) state.lineups[wmid][cur] = lu.filter(id => id !== out.id);
-        return true;
-      };
-      const pass = wmid => (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, pass: true });
-      const mode = waiverMode(cur);
-      const did = [];
-      if (mode === 'open') {
-        for (const m of [...state.managers].reverse()) did.push(doSwap(m.id) ? 'swap' : 'skip');
-      } else {
-        let guard = 0;
-        const swapsLeft = {};
-        while (!waiverState(cur).complete && guard++ < 80) {
-          const wv = waiverState(cur);
-          const wmid = wv.turnMid;
-          if (wmid == null) return { err: 'null turn before complete' };
-          swapsLeft[wmid] = swapsLeft[wmid] ?? (mode === 'redraft' ? 2 : 1);
-          if (swapsLeft[wmid] > 0 && Math.random() > 0.3 && doSwap(wmid)) { swapsLeft[wmid]--; did.push('swap'); }
-          else { pass(wmid); did.push('pass'); }
-        }
-        if (!waiverState(cur).complete) return { err: 'round never completed' };
+      // Tuesday 10:00: the Chairman's clock runs the waivers
+      const before = state.transfers.length;
+      processWaivers(true);
+      if (target) {
+        const winner = state.transfers.slice(before).find(t => t.inId === target.id && t.waiver);
+        out.checks.contestedToTopOfQueue = !!winner && winner.managerId === hi;
+        out.checks.loserGotNothing = !state.transfers.slice(before).some(t => t.inId === target.id && t.managerId === lo);
+      } else { out.checks.contestedToTopOfQueue = true; out.checks.loserGotNothing = true; }
+
+      // a trough stroll: someone signs a free agent the moment waivers clear
+      const m6 = state.managers[6].id;
+      const owned1 = ownedIdsAt(gw);
+      const pick = PLAYERS.filter(x => !owned1.has(x.id) && !onWaivers(x) && !arrivalLocked(x)).sort((a, b) => rating(b) - rating(a))
+        .find(x => [...squadAt(m6, gw)].some(d => squadShapeOk([...squadAt(m6, gw).filter(q => q.id !== d.id), x])));
+      if (pick) {
+        const drop = [...squadAt(m6, gw)].sort((a, b) => rating(a) - rating(b)).find(d => squadShapeOk([...squadAt(m6, gw).filter(q => q.id !== d.id), pick]));
+        state.transfers.push({ managerId: m6, outId: drop.id, inId: pick.id, gw, n: state.transfers.length + 1, t: Date.now() });
+        const lu = state.lineups[m6]?.[gw];
+        if (lu) state.lineups[m6][gw] = lu.filter(id => id !== drop.id);
       }
-      save(); render();
-      return { did, mode };
-    }, gw);
-    check(`GW${gw + 1} trough/waivers (${waiverResult.mode || '?'}) resolve`, !waiverResult.err && waiverResult.did.length > 0, JSON.stringify(waiverResult.err || (waiverResult.did.length + ' actions')));
+      out.checks.troughSignHappened = !!pick;
 
-    // squads still legal after waivers
-    const legal = await p.evaluate(() => {
+      // integrity: every squad 14 and legal, nobody owned twice
+      let legal = true;
+      const seen = new Set();
       for (const m of state.managers) {
-        if (managerSquad(m.id).length !== state.settings.squadSize) return false;
-        const nat = {};
-        managerSquad(m.id).forEach(pl => nat[pl.team] = (nat[pl.team] || 0) + 1);
-        if (Object.values(nat).some(n => n > countryCapNow(currentGwIndex()))) return false;
+        const sq = squadAt(m.id, gw);
+        if (sq.length !== 14 || !squadShapeOk(sq)) legal = false;
+        for (const x of sq) { if (seen.has(x.id)) legal = false; seen.add(x.id); }
       }
-      return true;
-    });
-    check(`GW${gw + 1} squads legal after trough swaps`, legal);
+      out.checks.squadsLegal = legal;
+
+      // scoring self-consistency: manager score = sum of effective XI
+      const m0 = state.managers[0].id;
+      const eff = effectiveXI(m0, gw);
+      out.checks.scoreConsistent = gwManagerPoints(m0, gw) === eff.xi.reduce((t, pid) => t + gwPlayerPoints(pid, gw), 0);
+      out.checks.xiFull = eff.xi.length === 11 && xiValid(eff.xi);
+
+      save(); render();
+      return out;
+    }, gw);
+    if (res.err) { check(`GW${gw + 1}`, false, res.err); continue; }
+    const bad = Object.entries(res.checks).filter(([, v]) => !v).map(([k]) => k);
+    check(`GW${gw + 1} waivers/trough/integrity/scoring`, bad.length === 0, bad.join(','));
   }
 
-  // ---------- 5. auto-sub: engineered case ----------
+  // ---------- 3. engineered auto-sub honouring bench order ----------
   const autoSub = await p.evaluate(() => {
-    const mid = state.managers[0].id;
-    const gw = 6;
+    const gw = 20, mid = state.managers[2].id;
+    const key = `gw${GAMEWEEKS[gw].n}`;
+    const ps = state.matchStats[key].playerStats;
     const xi = lineupFor(mid, gw);
-    const squad = squadAt(mid, gw);
-    const benchDF = squad.find(pl => !xi.includes(pl.id) && pl.pos === 'DF');
-    const startDF = xi.map(id => PLAYER_BY_ID[id]).find(pl => pl.pos === 'DF');
-    if (!benchDF || !startDF) return { skip: true };
-    const ps = state.matchStats.sim6.playerStats;
-    delete ps[startDF.id];                                  // starter never plays
-    ps[benchDF.id] = { st: 1, sub: 0, g: 1, a: 0, cs: 1 };  // bench DF has a blinder
-    const eff = effectiveXI(mid, gw);
-    const sub = eff.subs.find(s => s.out === startDF.id);
-    const c = xiCounts(eff.xi);
+    const startMF = xi.map(id => PLAYER_BY_ID[id]).find(x => x.pos === 'MF' && ps[x.id]);
+    if (!startMF) return { skip: true };
+    delete ps[startMF.id]; // he never played
+    // both outfield bench players played; order the WORSE one first
+    const bench = benchFor(mid, gw).filter(x => x.pos !== 'GK');
+    for (const bp of bench) ps[bp.id] = ps[bp.id] || { min: 90, st: 1, sub: 0, g: 0, a: 0, cs: 0, gc: 1, og: 0, ps: 0, pm: 0, yc: 0, rc: 0, sv: 0 };
+    const sorted = [...bench].sort((a, b) => rating(a) - rating(b));
+    setBenchOrder(mid, gw, [...sorted.map(x => x.id), ...benchFor(mid, gw).filter(x => x.pos === 'GK').map(x => x.id)]);
+    const queue = benchFor(mid, gw).filter(x => appearedInGw(x.id, gw));
+    const { xi: eff, subs } = effectiveXI(mid, gw);
+    const sub = subs.find(s => s.out === startMF.id);
+    const firstEligible = queue.find(c => xiValid([...lineupFor(mid, gw).filter(id => id !== startMF.id), c.id]));
     return {
-      subbedOut: !eff.xi.includes(startDF.id),
       replaced: !!sub,
-      replacementPlayed: sub ? appearedInGw(sub.in, gw) : false,
-      shapeOk: ['GK', 'DF', 'MF', 'FW'].every(pos => c[pos] >= XI_RULES[pos][0] && c[pos] <= XI_RULES[pos][1]),
-      fullXI: eff.xi.length === 11,
+      priorityRespected: sub && firstEligible && sub.in === firstEligible.id,
+      xiLegal: eff.length === 11 && xiValid(eff),
     };
   });
-  check('auto-sub: absent starter replaced by a bench player who played, XI stays legal',
-    autoSub.skip || (autoSub.subbedOut && autoSub.replaced && autoSub.replacementPlayed && autoSub.shapeOk && autoSub.fullXI), JSON.stringify(autoSub));
+  check('auto-sub follows bench order, XI stays legal',
+    autoSub.skip || (autoSub.replaced && autoSub.priorityRespected && autoSub.xiLegal), JSON.stringify(autoSub));
 
-  // ---------- 6. trade via the actual UI ----------
-  await p.evaluate(() => { state.view = 'team'; teamView.mid = state.managers[0].id; render(); });
-  await new Promise(r => setTimeout(r, 200));
+  // ---------- 4. a trade through the real UI ----------
+  await p.evaluate(() => { state.view = 'transfers'; transfersView.tab = 'trades'; whoami = state.managers[0].id; render(); });
+  await new Promise(r => setTimeout(r, 250));
   const tradeOk = await p.evaluate(async () => {
     const mid = state.managers[0].id, other = state.managers[1].id;
+    const cur = currentGwIndex();
     document.querySelector('#tradeWith').value = other;
     document.querySelector('#tradeWith').dispatchEvent(new Event('change'));
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 120));
     const mine = document.querySelector('#tradeMine'), theirs = document.querySelector('#tradeTheirs');
-    // find same-position pair to avoid quota complications
-    const myOpts = [...mine.options].slice(1), thOpts = [...theirs.options].slice(1);
-    const cur0 = currentGwIndex();
     let pair = null;
-    for (const mo of myOpts) {
+    for (const mo of [...mine.options].slice(1)) {
       const mp = PLAYER_BY_ID[+mo.value];
-      for (const to of thOpts) {
+      for (const to of [...theirs.options].slice(1)) {
         const tp = PLAYER_BY_ID[+to.value];
         if (tp.pos !== mp.pos) continue;
-        const aAfter = squadAt(mid, cur0).filter(x => x.id !== mp.id);
-        const bAfter = squadAt(other, cur0).filter(x => x.id !== tp.id);
-        if (countryCount(aAfter, tp.team) >= countryCapNow(cur0)) continue;
-        if (countryCount(bAfter, mp.team) >= countryCapNow(cur0)) continue;
-        pair = [mo.value, to.value]; break;
+        pair = [+mo.value, +to.value]; break;
       }
       if (pair) break;
     }
     if (!pair) return { skip: true };
     mine.value = pair[0]; theirs.value = pair[1];
     document.querySelector('#tradeGo').click();
-    await new Promise(r => setTimeout(r, 200));
-    const cur = currentGwIndex();
+    await new Promise(r => setTimeout(r, 150));
+    // counterparty accepts
+    whoami = other; render();
+    await new Promise(r => setTimeout(r, 150));
+    const acc = document.querySelector('[data-tracc]');
+    if (!acc) return { noOffer: true };
+    acc.click();
+    await new Promise(r => setTimeout(r, 150));
+    whoami = state.managers[0].id;
     return {
-      aHasB: squadAt(mid, cur).some(pl => pl.id === +pair[1]),
-      bHasA: squadAt(other, cur).some(pl => pl.id === +pair[0]),
+      aHasB: squadAt(mid, cur).some(x => x.id === pair[1]),
+      bHasA: squadAt(other, cur).some(x => x.id === pair[0]),
+      legal: squadShapeOk(squadAt(mid, cur)) && squadShapeOk(squadAt(other, cur)),
     };
   });
-  check('trade via UI swaps both squads', tradeOk.skip || (tradeOk.aHasB && tradeOk.bHasA), JSON.stringify(tradeOk));
+  check('trade proposed + accepted via UI swaps both squads', tradeOk.skip || (tradeOk.aHasB && tradeOk.bHasA && tradeOk.legal), JSON.stringify(tradeOk));
 
-  // ---------- 7. end of tournament — final tables ----------
-  await p.evaluate(() => { Date.now = () => new Date('2026-07-21T12:00Z').getTime(); render(); });
+  // ---------- 5. the Window Draft ----------
+  const wd = await p.evaluate(async () => {
+    // three new faces arrive after draft night
+    const owned = ownedIdsAt(currentGwIndex());
+    const newbies = PLAYERS.filter(x => !owned.has(x.id)).sort((a, b) => rating(b) - rating(a)).slice(0, 3);
+    for (const nb of newbies) delete state.draftPool.ids[nb.id];
+    transfersView.tab = 'trough'; render();
+    await new Promise(r => setTimeout(r, 100));
+    const lockedBefore = lockedArrivals().length;
+    const btn = document.querySelector('#wdStart');
+    if (!btn) return { noBtn: true, lockedBefore };
+    btn.click(); // confirm auto-accepted
+    await new Promise(r => setTimeout(r, 150));
+    const liveNow = state.windowDraft?.status === 'live';
+    const firstUp = wdActor();
+    const reversed = state.windowDraft.order[0] === state.draft.order[11];
+    // first manager signs an arrival (picking a drop that keeps the squad legal)
+    const actor = wdActor();
+    const outSel = document.querySelector('#wdOut');
+    let signed = false;
+    for (const inBtn of document.querySelectorAll('[data-wdin]')) {
+      const inP = PLAYER_BY_ID[+inBtn.dataset.wdin];
+      const drop = squadAt(actor, currentGwIndex()).find(d => squadShapeOk([...squadAt(actor, currentGwIndex()).filter(q => q.id !== d.id), inP]));
+      if (!drop) continue;
+      outSel.value = drop.id;
+      inBtn.click();
+      signed = true;
+      break;
+    }
+    await new Promise(r => setTimeout(r, 150));
+    if (!signed) return { noLegalSign: true };
+    for (let k = 0; k < 13 && document.querySelector('#wdPass'); k++) {
+      document.querySelector('#wdPass').click();
+      await new Promise(r => setTimeout(r, 60));
+    }
+    return {
+      lockedBefore, liveNow, reversed, firstUp,
+      done: state.windowDraft?.status === 'done',
+      unlocked: lockedArrivals().length === 0,
+      tagged: state.transfers.some(t => t.windowDraft),
+    };
+  });
+  check('window draft: lock → reverse-order draft → pass-lap → trough release',
+    wd.lockedBefore === 3 && wd.liveNow && wd.reversed && wd.done && wd.unlocked && wd.tagged, JSON.stringify(wd));
+
+  // ---------- 6. Monzo Cup recomputed independently ----------
+  const cup = await p.evaluate(() => {
+    let alive = state.managers.map(m => m.id);
+    const CUP = 7;
+    let rounds = 0;
+    for (let i = CUP; i < 33 && alive.length > 1; i++) {
+      if (gwStatus(i) !== 'final') break;
+      const scores = alive.map(id => ({ id, pts: gwManagerPoints(id, i) }));
+      const min = Math.min(...scores.map(s => s.pts));
+      const lowest = scores.filter(s => s.pts === min);
+      if (lowest.length === 1) alive = alive.filter(id => id !== lowest[0].id);
+      rounds++;
+    }
+    state.view = 'cup'; render();
+    const html = document.querySelector('#main').innerHTML;
+    const winner = alive.length === 1 ? teamName(alive[0]) : null;
+    return { alive: alive.length, rounds, winner, cardAgrees: winner ? html.includes('last man standing.') && html.includes(winner.replace(/&/g, '&amp;').slice(0, 10)) : html.includes('still standing') };
+  });
+  check('Monzo Cup eliminations consistent with the card', cup.cardAgrees, `${cup.rounds} rounds, ${cup.alive} alive${cup.winner ? ', winner ' + cup.winner : ''}`);
+
+  // ---------- 7. playoffs: GW34 semis, GW35–36 two-legged final ----------
+  for (let gw = 33; gw < 36; gw++) {
+    await p.evaluate(gw => {
+      const mid = (new Date(GAMEWEEKS[gw].from).getTime() + new Date(GAMEWEEKS[gw].to).getTime()) / 2;
+      Date.now = () => mid;
+      let seed = 9000 + gw;
+      const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+      const ps = {};
+      for (const m of state.managers) for (const pl of squadAt(m.id, gw)) {
+        if (rnd() < 0.1) continue;
+        ps[pl.id] = { min: 90, st: 1, sub: 0, g: rnd() < 0.12 ? 1 : 0, a: rnd() < 0.12 ? 1 : 0, cs: rnd() < 0.3 ? 1 : 0, gc: 0, og: 0, ps: 0, pm: 0, yc: 0, rc: 0, sv: pl.pos === 'GK' ? 3 : 0 };
+      }
+      state.matchStats[`gw${GAMEWEEKS[gw].n}`] = { gw, label: GAMEWEEKS[gw].label, date: GAMEWEEKS[gw].from, final: true, playerStats: ps };
+      save(); render();
+    }, gw);
+  }
+  const po = await p.evaluate(() => {
+    Date.now = () => new Date(GAMEWEEKS[36].from).getTime() + 1000;
+    const po = playoffState();
+    if (!po) return { err: 'playoffState null after GW36' };
+    // independent recompute
+    const seeds = standingsBefore(33).rows.map(r => r.id).slice(0, 4);
+    const semiW = [[seeds[0], seeds[3]], [seeds[1], seeds[2]]].map(([x, y]) => {
+      const px = gwManagerPoints(x, 33), py = gwManagerPoints(y, 33);
+      return px === py ? (seeds.indexOf(x) < seeds.indexOf(y) ? x : y) : (px > py ? x : y);
+    });
+    let cx = 0, cy = 0, wx = 0, wy = 0;
+    for (const i of [34, 35]) {
+      const a = gwManagerPoints(semiW[0], i), b = gwManagerPoints(semiW[1], i);
+      cx += a; cy += b;
+      if (a > b) wx++; else if (b > a) wy++;
+    }
+    const champ = wx > wy ? semiW[0] : wy > wx ? semiW[1]
+      : cx > cy ? semiW[0] : cy > cx ? semiW[1] : (seeds.indexOf(semiW[0]) < seeds.indexOf(semiW[1]) ? semiW[0] : semiW[1]);
+    state.view = 'h2h'; render();
+    const html = document.querySelector('#main').innerHTML;
+    return {
+      seedsMatch: JSON.stringify(po.seeds) === JSON.stringify(seeds),
+      semisMatch: JSON.stringify(po.semiWinners) === JSON.stringify(semiW),
+      champMatch: po.champion === champ,
+      champ: teamName(champ),
+      cardShowsChamp: html.includes('champions of The League'),
+    };
+  });
+  check('playoffs: seeds, semi winners and champion all agree with independent recompute',
+    !po.err && po.seedsMatch && po.semisMatch && po.champMatch && po.cardShowsChamp, po.err || `champion: ${po.champ}`);
+
+  // ---------- 8. season-end table + analytics sanity ----------
   const finals = await p.evaluate(() => {
     const st = h2hStandings();
-    const statuses = GAMEWEEKS.map((g, i) => gwStatus(i));
-    const totals = state.managers.map(m => ({ name: m.name, pts: managerPoints(m.id) }));
-    const sane = st.every(r => r.p === 8 && r.w + r.d + r.l === r.p && r.pts === 3 * r.w + r.d);
-    return { statuses, table: st.map(r => `${r.name} P${r.p} W${r.w} D${r.d} L${r.l} = ${r.pts}`), totals, sane };
+    const sane = st.every(r => r.p === 33 && r.w + r.d + r.l === 33 && r.pts === 3 * r.w + r.d);
+    const ap = allPlayTable();
+    const apSane = Object.values(ap.rows).every(r => r.w + r.d + r.l === 33 * 11);
+    const waste = state.managers.every(m => seasonBenchWaste(m.id) >= 0);
+    return { sane, apSane, waste, top: st[0].team || st[0].name };
   });
-  check('all 8 gameweeks final', finals.statuses.every(s => s === 'final'), finals.statuses.join(','));
-  check('H2H table arithmetic sane (P=8, pts=3W+D)', finals.sane, finals.table.join(' | '));
-  check('overall points positive for all', finals.totals.every(t => t.pts > 0), JSON.stringify(finals.totals));
+  check('H2H table arithmetic (P=33, pts=3W+D)', finals.sane, `winner of the table: ${finals.top}`);
+  check('all-play ledger complete (33×11 games each)', finals.apSane);
+  check('bench waste non-negative for all', finals.waste);
 
-  // ---------- 8. every view renders without errors at season end ----------
-  for (const v of ['draft', 'team', 'h2h', 'table', 'fixtures', 'rules', 'settings']) {
+  // ---------- 9. every view renders at season end ----------
+  for (const v of ['dash', 'draft', 'team', 'transfers', 'h2h', 'cup', 'table', 'fixtures', 'rules', 'settings']) {
     await p.evaluate(v => { state.view = v; render(); }, v);
-    await new Promise(r => setTimeout(r, 120));
-    const r = await p.$eval('#main', el => ({ len: el.innerHTML.length, empty: el.textContent.includes('No fixtures loaded') }));
-    check(`view "${v}" renders`, r.len > 500 || (v === 'fixtures' && r.empty), `${r.len} chars`);
+    await new Promise(r => setTimeout(r, 100));
+    const len = await p.$eval('#main', el => el.innerHTML.length);
+    // fixtures is legitimately sparse here — the sim runs with no fixture data
+    check(`view "${v}" renders`, len > (v === 'fixtures' ? 100 : 400), `${len} chars`);
   }
 
-  check('zero page errors across whole simulation', pageErrors.length === 0, pageErrors.slice(0, 3).join(' ; '));
+  check('zero page errors across the whole season', pageErrors.length === 0, pageErrors.slice(0, 3).join(' ; '));
   await browser.close();
-  console.log(failures ? `\n${failures} FAILURES` : '\nALL CHECKS PASSED');
+  console.log(failures ? `\n${failures} FAILURES` : '\nALL CHECKS PASSED — the season holds.');
   process.exit(failures ? 1 : 0);
-})().catch(e => { console.error('HARNESS ERROR', e.message); process.exit(2); });
+})().catch(e => { console.error('HARNESS ERROR', e); process.exit(2); });

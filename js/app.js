@@ -1189,13 +1189,13 @@ async function claimIdentity(mid) {
     if (pin == null) return false;
     if (await pinHash(mid, pin.trim()) !== state.pins[mid]) { toast('Wrong PIN. The Committee has logged this attempt.'); return false; }
   } else if (mid !== -1 && netOn()) {
-    const pin = prompt(`Set a PIN for ${managerName(mid)} (4+ digits — you'll need it to act as them on any device). Cancel to stay PIN-less:`);
-    if (pin && pin.trim().length >= 4) {
-      (state.pins = state.pins || {})[mid] = await pinHash(mid, pin.trim());
-      pushShared(`pins/${mid}`, state.pins[mid]);
-      save();
-      toast('PIN set. Do not tell Tussie.');
-    } else if (pin != null) { toast('PIN needs at least 4 digits — not set'); }
+    // first sign-in: a PIN is required — it's what stops Tussie acting as you
+    const pin = prompt(`First sign-in for ${managerName(mid)} — set a PIN (4+ digits). You'll use it on any device.`);
+    if (!pin || pin.trim().length < 4) { toast('A PIN (4+ digits) is required to sign in.'); return false; }
+    (state.pins = state.pins || {})[mid] = await pinHash(mid, pin.trim());
+    pushShared(`pins/${mid}`, state.pins[mid]);
+    save();
+    toast('PIN set. Do not tell Tussie.');
   }
   whoami = mid;
   localStorage.setItem(WHO_KEY, whoami);
@@ -1204,25 +1204,36 @@ async function claimIdentity(mid) {
   return true;
 }
 
+let forceIdentity = false; // set when an action needs a signed-in manager first
 function renderIdentity() {
   let ov = $('#whoOverlay');
-  const needed = netOn() && state.phase !== 'setup' && !whoami;
+  const needed = (netOn() && state.phase !== 'setup' && !whoami) || forceIdentity;
   if (!needed) { ov?.remove(); return; }
-  if (ov) return;
+  ov?.remove();
   ov = document.createElement('div');
   ov.id = 'whoOverlay';
   ov.className = 'overlay';
-  ov.innerHTML = `<div class="card" style="max-width:420px;width:92%">
-    <h2>Who are you?</h2>
-    <p class="muted" style="font-size:13px;margin-bottom:14px">Actions from this device count for the manager you pick. Choose honestly — the Committee has your number. And your Monzo handle.</p>
-    ${state.managers.map((m, i) => `<button class="btn ghost" data-who="${m.id}" style="width:100%;margin-bottom:8px;text-align:left">${esc(m.name)}${state.pins?.[m.id] ? ' &#128274;' : ''}${i === 0 ? ' <span class="tag">commissioner</span>' : ''}</button>`).join('')}
-    <button class="btn ghost" data-who="-1" style="width:100%;opacity:.7">Just watching</button>
-    <button class="btn ghost" id="whoDemo" style="width:100%;opacity:.7">&#127918; Just exploring — show me a demo season</button>
+  ov.innerHTML = `<div class="card" style="max-width:560px;width:94%">
+    <h2>Sign in</h2>
+    <p class="muted" style="font-size:13px;margin-bottom:14px">Pick your team. First sign-in sets your PIN (4+ digits); after that it's your key on any device. Forgotten PINs go to the Chairman.</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px;margin-bottom:10px">
+    ${state.managers.map((m, i) => `<button class="btn ghost" data-who="${m.id}" style="text-align:left;padding:10px 12px">
+      <b>${esc(m.team || m.name)}</b>${i === 0 ? ' <span class="tag">Chairman</span>' : ''}<br>
+      <span class="muted" style="font-size:11.5px">${esc(m.name)} ${state.pins?.[m.id] ? '&#128274;' : '<span style="color:var(--accent)">· first sign-in</span>'}</span>
+    </button>`).join('')}
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn ghost small" data-who="-1" style="flex:1;opacity:.75">&#128065; Just watching</button>
+      <button class="btn ghost small" id="whoDemo" style="flex:1;opacity:.75">&#127918; Show me a demo season</button>
+      ${forceIdentity ? '<button class="btn ghost small" id="whoCancel" style="opacity:.75">&#10005;</button>' : ''}
+    </div>
   </div>`;
   document.body.appendChild(ov);
-  ov.querySelector('#whoDemo').onclick = () => { ov.remove(); enterDemo(); };
+  ov.querySelector('#whoDemo').onclick = () => { forceIdentity = false; ov.remove(); enterDemo(); };
+  const wc = ov.querySelector('#whoCancel');
+  if (wc) wc.onclick = () => { forceIdentity = false; ov.remove(); };
   ov.querySelectorAll('[data-who]').forEach(b => b.onclick = async () => {
-    await claimIdentity(+b.dataset.who);
+    if (await claimIdentity(+b.dataset.who)) { forceIdentity = false; render(); }
   });
 }
 
@@ -1336,6 +1347,13 @@ function bindSetup() {
     render();
   });
   const startDraft = randomise => {
+    // only the Chairman pulls this trigger — sign in first if the device hasn't
+    if (netOn() && whoami !== state.managers[0].id) {
+      toast('Only the Chairman starts the draft — sign in as him to prove it');
+      forceIdentity = true;
+      renderIdentity();
+      return;
+    }
     if (!confirm('This starts the REAL draft for all twelve managers. Everyone ready?')) return;
     state.managers.forEach((m, i) => { if (!m.name.trim()) m.name = `Manager ${i + 1}`; });
     if (state.settings.squadSize < 11) { toast('Squads need at least 11 for a starting XI'); return; }
