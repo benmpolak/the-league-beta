@@ -142,7 +142,7 @@ function actGuard(mid, what = 'team') {
   return true;
 }
 
-const SHARED_KEYS = ['phase', 'managers', 'settings', 'draft', 'lineups', 'transfers', 'trades', 'covenants', 'claims', 'waiverMeta', 'autolists', 'pins', 'adjustments', 'shirtNums', 'draftPool', 'windowDraft'];
+const SHARED_KEYS = ['phase', 'managers', 'settings', 'draft', 'lineups', 'transfers', 'trades', 'covenants', 'claims', 'waiverMeta', 'autolists', 'pins', 'adjustments', 'shirtNums', 'draftPool', 'windowDraft', 'tradeBlock'];
 function sharedSnapshot() {
   const o = {};
   for (const k of SHARED_KEYS) o[k] = state[k];
@@ -253,6 +253,7 @@ function freshState() {
     waiverMeta: { lastRun: null, control: 'auto' }, // control: auto | open | closed
     draftPool: null,       // draft-night snapshot {at, ids: {pid: club}} — anyone outside it is a locked "new arrival"
     windowDraft: null,     // {status: live|done, order, turn, passes, picks} — post-window mini-draft of arrivals
+    tradeBlock: {},        // managerId -> [pid] players publicly listed as available to trade
     fixtures: [],
     matchStats: {},        // 'gw{n}' -> { gw, label, date, final, playerStats: {pid:{min,st,sub,g,a,cs,gc,og,ps,pm,yc,rc,sv}} }
     adjustments: {},
@@ -368,6 +369,7 @@ function load() {
     if (s && !s.shirtNums) s.shirtNums = {};
     if (s && s.draftPool === undefined) s.draftPool = null;
     if (s && s.windowDraft === undefined) s.windowDraft = null;
+    if (s && !s.tradeBlock) s.tradeBlock = {};
     if (s && s.settings.pickTimer == null) s.settings.pickTimer = 30;
     if (s && !s.settings.posMin) s.settings.posMin = { GK: 1, DF: 3, MF: 3, FW: 1 };
     if (s && !s.settings.posMax) s.settings.posMax = { GK: 2, DF: 6, MF: 6, FW: 4 };
@@ -927,6 +929,88 @@ function playerPoints(pid) {
   if (p.pos === 'GK') { say(agg.sv, 'Saves'); say(agg.ps, 'Pen saves'); }
   say(agg.yc, 'Yellows'); say(agg.rc, 'Reds'); say(agg.og, 'Own goals'); say(agg.pm, 'Pens missed');
   return { pts, agg, lines };
+}
+
+/* ---------------- bragging metrics: bench waste, luck, playoff odds ---------------- */
+// the best legal XI a manager COULD have fielded that gameweek
+function optimalXI(mid, gwIdx) {
+  const byPos = { GK: [], DF: [], MF: [], FW: [] };
+  for (const p of squadAt(mid, gwIdx)) byPos[p.pos].push(gwPlayerPoints(p.id, gwIdx));
+  for (const k in byPos) byPos[k].sort((a, b) => b - a);
+  const take = (arr, n) => arr.slice(0, n).reduce((t, x) => t + x, 0);
+  let best = 0;
+  for (let df = XI_RULES.DF[0]; df <= Math.min(XI_RULES.DF[1], byPos.DF.length); df++)
+    for (let mf = XI_RULES.MF[0]; mf <= Math.min(XI_RULES.MF[1], byPos.MF.length); mf++) {
+      const fw = XI_RULES.size - 1 - df - mf;
+      if (fw < XI_RULES.FW[0] || fw > XI_RULES.FW[1] || fw > byPos.FW.length || !byPos.GK.length) continue;
+      best = Math.max(best, take(byPos.GK, 1) + take(byPos.DF, df) + take(byPos.MF, mf) + take(byPos.FW, fw));
+    }
+  return best;
+}
+const benchWaste = (mid, gwIdx) => Math.max(0, optimalXI(mid, gwIdx) - gwManagerPoints(mid, gwIdx));
+function seasonBenchWaste(mid) {
+  let w = 0;
+  for (let i = 0; i < REGULAR_GWS; i++) if (gwStatus(i) === 'final') w += benchWaste(mid, i);
+  return w;
+}
+// all-play: your record if you'd played all eleven others every finished gameweek
+function allPlayTable() {
+  const rows = Object.fromEntries(state.managers.map(m => [m.id, { w: 0, d: 0, l: 0 }]));
+  let played = 0;
+  for (let i = 0; i < REGULAR_GWS; i++) {
+    if (gwStatus(i) !== 'final') continue;
+    played++;
+    const scores = state.managers.map(m => [m.id, gwManagerPoints(m.id, i)]);
+    for (const [id, s] of scores) for (const [oid, os] of scores) {
+      if (id === oid) continue;
+      if (s > os) rows[id].w++; else if (s < os) rows[id].l++; else rows[id].d++;
+    }
+  }
+  return { rows, played };
+}
+// Monte Carlo the rest of the regular season from each manager's scoring history
+function playoffOdds(runs = 1000) {
+  const hist = Object.fromEntries(state.managers.map(m => [m.id, []]));
+  for (let i = 0; i < REGULAR_GWS; i++) {
+    if (gwStatus(i) !== 'final') continue;
+    for (const m of state.managers) hist[m.id].push(gwManagerPoints(m.id, i));
+  }
+  const played = hist[state.managers[0].id].length;
+  if (played < 3 || played >= REGULAR_GWS) return null; // too early to guess / nothing left to simulate
+  const dist = {};
+  for (const m of state.managers) {
+    const a = hist[m.id];
+    const mean = a.reduce((t, x) => t + x, 0) / a.length;
+    const sd = Math.sqrt(a.reduce((t, x) => t + (x - mean) ** 2, 0) / a.length);
+    dist[m.id] = { mean, sd: Math.max(6, sd) };
+  }
+  const base = h2hStandings(false);
+  const remaining = [];
+  for (let i = 0; i < REGULAR_GWS; i++) if (gwStatus(i) !== 'final') remaining.push(i);
+  const counts = Object.fromEntries(state.managers.map(m => [m.id, 0]));
+  const norm = ({ mean, sd }) => mean + sd * Math.sqrt(-2 * Math.log(Math.random() || 1e-9)) * Math.cos(2 * Math.PI * Math.random());
+  for (let r = 0; r < runs; r++) {
+    const pts = {}, pf = {};
+    for (const row of base) { pts[row.id] = row.pts; pf[row.id] = row.pf; }
+    for (const i of remaining) for (const [a, b] of pairingsFor(i)) {
+      const sa = norm(dist[a]), sb = norm(dist[b]);
+      pf[a] += sa; pf[b] += sb;
+      if (Math.abs(sa - sb) < 0.5) { pts[a]++; pts[b]++; } else if (sa > sb) pts[a] += 3; else pts[b] += 3;
+    }
+    state.managers.map(m => m.id)
+      .sort((x, y) => (pts[y] - pts[x]) || (pf[y] - pf[x]))
+      .slice(0, 4).forEach(id => counts[id]++);
+  }
+  return Object.fromEntries(Object.entries(counts).map(([id, c]) => [id, Math.round(100 * c / runs)]));
+}
+/* ---------------- the trade block ---------------- */
+const blockList = mid => toArr(state.tradeBlock?.[mid]);
+const onBlock = pid => state.managers.some(m => blockList(m.id).includes(pid));
+function toggleBlock(mid, pid) {
+  const list = blockList(mid);
+  state.tradeBlock = { ...(state.tradeBlock || {}), [mid]: list.includes(pid) ? list.filter(x => x !== pid) : [...list, pid] };
+  pushShared('tradeBlock', state.tradeBlock);
+  save(); render();
 }
 
 /* ---------------- head-to-head ---------------- */
@@ -2129,7 +2213,7 @@ function bindTeam() {
 }
 
 /* ---------------- the Transfers hub (Draft Fantasy layout) ---------------- */
-let transfersView = { tab: 'trough', out: null, pos: '', scope: 'free', sort: 'pts', limit: 20 };
+let transfersView = { tab: 'trough', out: null, pos: '', club: '', scope: 'free', sort: 'pts', limit: 20 };
 function viewTransfers() {
   const mid = (whoami && whoami !== -1) ? whoami : state.managers[0].id;
   const cur = currentGwIndex();
@@ -2214,7 +2298,18 @@ function viewTransfers() {
     </div>`;
   }
   if (tab === 'trades') {
-    return `${head}<div class="card">
+    const block = state.managers.flatMap(m => blockList(m.id).map(pid => ({ mid: m.id, p: PLAYER_BY_ID[pid] })).filter(x => x.p));
+    return `${head}<div class="card" style="margin-bottom:14px">
+      <h2>The Trade Block <span class="muted" style="font-weight:400;font-size:12px">publicly up for grabs — make an offer</span></h2>
+      ${block.length ? block.map(({ mid: bm, p }) => `<div class="lrow" style="font-size:12.5px">
+        <span class="pos-badge pos-${p.pos}">${p.pos}</span>${photoImg(p)} ${pname(p)} <span class="muted" style="font-size:11px">${esc(p.club)} · ${metricsFor(p).pts} pts</span>
+        <b style="margin-left:6px">${esc(teamName(bm))}</b>
+        <span style="margin-left:auto">${bm === mid
+          ? `<button class="btn ghost small" data-unblock="${p.id}">Delist</button>`
+          : `<button class="btn small" data-blocktrade="${bm}:${p.id}">Make an offer</button>`}</span>
+      </div>`).join('') : '<p class="muted" style="font-size:12.5px">Nobody’s listed anyone. Open your player cards and put someone on the block.</p>'}
+    </div>
+    <div class="card">
       <h2>Trade desk</h2>
       <p class="muted" style="font-size:12px;margin-bottom:10px">Propose a swap; it executes the instant the other manager accepts.</p>
       ${toArr(state.trades).filter(t => t.status === 'pending' && (t.to === mid || t.from === mid)).map(t => `
@@ -2346,6 +2441,7 @@ function bindTransfers() {
       for (const mm of state.managers) for (const sp of squadAt(mm.id, cur)) ownedBy[sp.id] = mm.id;
       let pool = transfersView.scope === 'all' ? [...PLAYERS] : PLAYERS.filter(p => !owned.has(p.id));
       if (transfersView.pos) pool = pool.filter(p => p.pos === transfersView.pos);
+      if (transfersView.club) pool = pool.filter(p => p.team === transfersView.club);
       if (q) pool = pool.filter(p => normName(p.name).includes(q) || normName(p.team).includes(q) || normName(p.club).includes(q));
       const s = transfersView.sort;
       const live = seasonHasStats();
@@ -2374,22 +2470,28 @@ function bindTransfers() {
             ? (ownerMid === mid ? '<span class="muted" style="font-size:11px">yours</span>' : `<button class="btn ghost small" data-trtrade="${ownerMid}:${p.id}" title="Open the trade desk with ${esc(managerName(ownerMid))}">Trade</button>`)
             : `<button class="btn small ${waiv || locked ? 'ghost' : ''}" data-trin="${p.id}" data-waiv="${waiv ? 1 : 0}" ${ok ? '' : `disabled title="${why}"`}>${locked ? '&#128274;' : waiv ? 'Claim' : 'Sign'}</button>`;
           return `<tr>
-            <td><div class="pcell">${photoImg(p)}<div><div class="pname">${esc(p.name)}</div><div class="pclub">${flagImg(p.team)} ${esc(p.club)} · <span class="pos-badge pos-${p.pos}">${p.pos}</span>${ownerMid ? ` · <b style="color:var(--text)">${esc(teamName(ownerMid))}</b>` : locked ? ' · <span class="muted">&#128274; new arrival</span>' : waiv ? ' · <span class="muted">on waivers</span>' : ''}</div></div></div></td>
+            <td><div class="pcell">${photoImg(p)}<div><div class="pname">${esc(p.name)}</div><div class="pclub">${flagImg(p.team)} ${esc(p.club)} · <span class="pos-badge pos-${p.pos}">${p.pos}</span>${ownerMid ? ` · <b style="color:var(--text)">${esc(teamName(ownerMid))}</b>${onBlock(p.id) ? ' · <span style="color:var(--accent)">&#128276; on the block</span>' : ''}` : locked ? ' · <span class="muted">&#128274; new arrival</span>' : waiv ? ' · <span class="muted">on waivers</span>' : ''}</div></div></div></td>
             <td>${statusChip(p)}</td>
             ${cols.map(c => `<td class="num${c.cls || ''}">${c.v(m, p)}</td>`).join('')}
             <td>${action}</td>
           </tr>`;
         }).join('')}</tbody>
       </table></div>
-      ${total > transfersView.limit ? `<div class="show-more"><button class="btn ghost small" id="trMore">Show more (${total - transfersView.limit} hidden)</button></div>` : ''}`;
+      ${total > transfersView.limit ? `<div class="show-more"><button class="btn ghost small" id="trMore">Show more</button> <button class="btn ghost small" id="trAll">Show all ${total}</button></div>` : ''}`;
       results.innerHTML = hint + `
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin:2px 0 8px;align-items:center">
         ${['', 'GK', 'DF', 'MF', 'FW'].map(pp => `<button class="btn small ${transfersView.pos === pp ? '' : 'ghost'}" data-trpos="${pp}">${pp || 'All'}</button>`).join('')}
+        <select id="trClub" style="padding:6px 8px;font-size:12px">
+          <option value="">All clubs</option>
+          ${TEAMS.map(t => `<option value="${esc(t.name)}" ${transfersView.club === t.name ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+        </select>
         <span style="width:8px"></span>
         <button class="btn small ${transfersView.scope !== 'all' ? '' : 'ghost'}" data-trscope="free">Free agents</button>
         <button class="btn small ${transfersView.scope === 'all' ? '' : 'ghost'}" data-trscope="all" title="Show owned players too, Draft Fantasy style">Everyone</button>
         ${colToggleHtml(live)}
       </div>` + (shown.length ? table : '<span class="muted">The Trough is empty. Somehow.</span>');
+      const clubSel = results.querySelector('#trClub');
+      if (clubSel) clubSel.onchange = () => { transfersView.club = clubSel.value; transfersView.limit = 20; renderTrResults(); };
       results.querySelectorAll('[data-trpos]').forEach(b => b.onclick = () => { transfersView.pos = b.dataset.trpos; transfersView.limit = 20; renderTrResults(); });
       results.querySelectorAll('[data-trscope]').forEach(b => b.onclick = () => { transfersView.scope = b.dataset.trscope; transfersView.limit = 20; renderTrResults(); });
       results.querySelectorAll('[data-trtrade]').forEach(b => b.onclick = () => {
@@ -2399,7 +2501,9 @@ function bindTransfers() {
       results.querySelectorAll('[data-trsort]').forEach(th => th.onclick = () => { transfersView.sort = th.dataset.trsort; renderTrResults(); });
       bindColToggle(renderTrResults);
       const more = results.querySelector('#trMore');
-      if (more) more.onclick = () => { transfersView.limit += 30; renderTrResults(); };
+      if (more) more.onclick = () => { transfersView.limit += 50; renderTrResults(); };
+      const showAll = results.querySelector('#trAll');
+      if (showAll) showAll.onclick = () => { transfersView.limit = 9999; renderTrResults(); };
       results.querySelectorAll('[data-trin]').forEach(b => b.onclick = () => {
         if (!actGuard(mid, 'squad')) return;
         const inId = +b.dataset.trin, outId = transfersView.out;
@@ -2449,6 +2553,16 @@ function bindTransfers() {
     save(); render();
     toast('Offer withdrawn. Never happened.');
   });
+  // trade block: delist your own, make an offer for theirs
+  document.querySelectorAll('[data-unblock]').forEach(b => b.onclick = () => {
+    if (!actGuard(mid, 'trade block')) return;
+    toggleBlock(mid, +b.dataset.unblock);
+  });
+  document.querySelectorAll('[data-blocktrade]').forEach(b => b.onclick = () => {
+    const [other, get] = b.dataset.blocktrade.split(':').map(Number);
+    window._tradeFocus = { other, get };
+    render();
+  });
   const tradeWith = $('#tradeWith'), pickers = $('#tradePickers');
   if (tradeWith && window._tradeFocus) {
     const tf = window._tradeFocus;
@@ -2478,7 +2592,9 @@ function bindTransfers() {
         </select>
         <input type="text" id="tradeTerms" maxlength="200" placeholder="Side terms (optional) — loan-backs, first refusals, the nonsense…" style="width:100%;margin-bottom:8px">
         <button class="btn small" id="tradeGo">Propose trade</button>`;
-      $('#tradeGo').onclick = () => {
+      const tradeGo = pickers.querySelector('#tradeGo');
+      if (!tradeGo) return;
+      tradeGo.onclick = () => {
         if (!actGuard(mid, 'trade')) return;
         const a = +$('#tradeMine').value, b = +$('#tradeTheirs').value;
         if (!a || !b) { toast('Pick a player from each side'); return; }
@@ -2546,6 +2662,7 @@ function viewDash() {
       ${myPos > 4 ? `<div class="lrow" style="font-size:12.5px;border-top:1px dashed var(--line)"><span class="muted">${myPos}</span> <b>${esc(teamName(mid))}</b><span style="margin-left:auto" class="gold">${table[myPos - 1].pts}</span></div>` : ''}
     </div>
   </div>
+  ${awardsCard()}
   ${treatmentRoomCard()}`;
 }
 /* ----- the Treatment Room: league-wide injury desk + fixture quirks -----
@@ -2591,6 +2708,70 @@ function treatmentRoomCard() {
       ${q.bgw.length ? `<span class="muted">BLANK: ${q.bgw.map(short).join(', ')}</span>` : ''}</div>`).join('')
       : '<p class="muted" style="font-size:12.5px">No blank or double gameweeks on the horizon.</p>'}
     <p class="muted" style="font-size:10.5px;margin-top:8px">Injury lines from the official FPL feed (Premier Injuries data), refreshed every 15 minutes. Deep cuts: <a href="https://x.com/BenDinnery" target="_blank" rel="noopener" style="color:var(--accent)">@BenDinnery</a> · <a href="https://x.com/BenCrellin" target="_blank" rel="noopener" style="color:var(--accent)">@BenCrellin</a>.</p>
+  </div>`;
+}
+/* ----- the Crystal Ball: luck, playoff odds, points left on bench ----- */
+function crystalBallCard(standings) {
+  const { rows: ap, played } = allPlayTable();
+  if (!played) return '';
+  const odds = playoffOdds();
+  const rows = standings.map(r => {
+    const a = ap[r.id];
+    // expected H2H points if you'd played everyone: (3W + D) scaled to one game a week
+    const expPts = (3 * a.w + a.d) / 11;
+    const luck = r.pts - expPts;
+    return { id: r.id, team: r.team || r.name, a, luck, waste: seasonBenchWaste(r.id), odds: odds?.[r.id] };
+  });
+  const luckiest = [...rows].sort((x, y) => y.luck - x.luck)[0];
+  const wasteful = [...rows].sort((x, y) => y.waste - x.waste)[0];
+  return `<div class="card" style="margin-bottom:18px">
+    <h2>The Crystal Ball <span class="muted" style="font-weight:400;font-size:12px">luck, waste and destiny — the arguments, quantified</span></h2>
+    <div style="overflow-x:auto">
+    <table class="pool-table">
+      <thead><tr><th>Team</th>
+        <th class="num" title="Your record if you'd played all eleven others every week">All-play</th>
+        <th class="num" title="H2H points vs what your scores deserved. Positive = riding your luck">Luck</th>
+        <th class="num" title="Points left on the bench vs your best possible XI, season total">Bench waste</th>
+        ${odds ? '<th class="num" title="Monte Carlo simulation of the remaining fixtures, 1,000 runs">Playoffs %</th>' : ''}
+      </tr></thead>
+      <tbody>
+      ${rows.map(r => `<tr>
+        <td><b>${esc(r.team)}</b>${r.id === luckiest.id && r.luck > 1 ? ' <span title="Luckiest team in the league">&#127808;</span>' : ''}${r.id === wasteful.id && r.waste > 0 ? ' <span title="Most points left rotting on the bench">&#129681;</span>' : ''}</td>
+        <td class="num muted">${r.a.w}-${r.a.d}-${r.a.l}</td>
+        <td class="num" style="color:${r.luck > 0.5 ? '#3fb96d' : r.luck < -0.5 ? '#e05555' : 'var(--muted)'}">${r.luck > 0 ? '+' : ''}${r.luck.toFixed(1)}</td>
+        <td class="num muted">${r.waste}</td>
+        ${odds ? `<td class="num gold">${r.odds}%</td>` : ''}
+      </tr>`).join('')}
+      </tbody>
+    </table></div>
+    <p class="muted" style="font-size:10.5px;margin-top:6px">All-play: your record playing every manager every finished week. Luck: actual H2H points minus what that record deserved. ${odds ? 'Playoff odds: 1,000 simulated seasons from everyone’s scoring so far.' : 'Playoff odds appear after three finished gameweeks.'}</p>
+  </div>`;
+}
+/* ----- the week's awards, auto-issued ----- */
+function awardsCard() {
+  let last = -1;
+  for (let i = 0; i < REGULAR_GWS; i++) if (gwStatus(i) === 'final') last = i;
+  if (last < 0) return '';
+  const scores = state.managers.map(m => ({ id: m.id, s: gwManagerPoints(m.id, last), waste: benchWaste(m.id, last) }));
+  const hi = [...scores].sort((a, b) => b.s - a.s)[0];
+  const lo = [...scores].sort((a, b) => a.s - b.s)[0];
+  const results = pairingsFor(last).map(([a, b]) => {
+    const sa = gwManagerPoints(a, last), sb = gwManagerPoints(b, last);
+    return sa === sb ? null : { w: sa > sb ? a : b, l: sa > sb ? b : a, ws: Math.max(sa, sb), ls: Math.min(sa, sb), margin: Math.abs(sa - sb) };
+  }).filter(Boolean);
+  const jammy = [...results].sort((a, b) => a.ws - b.ws)[0];
+  const robbed = [...results].sort((a, b) => b.ls - a.ls)[0];
+  const hiding = [...results].sort((a, b) => b.margin - a.margin)[0];
+  const bench = [...scores].sort((a, b) => b.waste - a.waste)[0];
+  const row = (icon, label, text) => `<div class="lrow" style="font-size:12.5px"><span style="width:22px">${icon}</span><b style="min-width:150px">${label}</b><span>${text}</span></div>`;
+  return `<div class="card" style="margin-top:14px">
+    <h2>GW${GAMEWEEKS[last].n} — The Committee's Awards <span class="muted" style="font-weight:400;font-size:12px">issued automatically, disputed endlessly</span></h2>
+    ${row('&#127942;', 'Manager of the Week', `<b>${esc(teamName(hi.id))}</b> — ${hi.s} points`)}
+    ${row('&#129348;', 'The Wooden Spoon', `<b>${esc(teamName(lo.id))}</b> — ${lo.s} points`)}
+    ${jammy ? row('&#127808;', 'Jammiest Win', `<b>${esc(teamName(jammy.w))}</b> won with just ${jammy.ws}`) : ''}
+    ${robbed ? row('&#128148;', 'Robbed', `<b>${esc(teamName(robbed.l))}</b> scored ${robbed.ls} and still lost`) : ''}
+    ${hiding ? row('&#128296;', 'Biggest Hiding', `<b>${esc(teamName(hiding.w))}</b> ${hiding.ws}–${hiding.ls} <b>${esc(teamName(hiding.l))}</b>`) : ''}
+    ${bench.waste > 0 ? row('&#129681;', 'Bench of the Week', `<b>${esc(teamName(bench.id))}</b> left ${bench.waste} point${bench.waste === 1 ? '' : 's'} rotting on the bench`) : ''}
   </div>`;
 }
 function bindDash() {
@@ -2860,6 +3041,7 @@ function viewH2H() {
     </table>
     <p class="muted" style="font-size:11px;margin-top:6px">Top four make the playoffs.${liveNow ? ' Live table — includes the gameweek in progress.' : ''}</p>
   </div>
+  ${crystalBallCard(standings)}
   ${gwPreviewCard(cur)}
   ${playoffCard()}
   ${(() => {
@@ -3304,6 +3486,13 @@ function showPlayerCard(pid) {
         window._tradeFocus = { other: owner.id, get: pid };
         transfersView.tab = 'trades'; state.view = 'transfers'; save(); render();
       });
+    } else {
+      const listed = blockList(whoami).includes(pid);
+      btn(listed ? 'Take off the trade block' : '&#128276; Put on the trade block', () => {
+        ov.remove();
+        toggleBlock(whoami, pid);
+        toast(listed ? `${p.name} quietly delisted.` : `${p.name} is on the block. Offers invited.`);
+      }, true);
     }
   }
 }
