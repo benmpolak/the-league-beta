@@ -488,6 +488,21 @@ const DEFAULT_STADIA = {
   12: 'The WACA',                                 // WA Wanderers
 };
 function stadium(mid) { const m = state.managers.find(m => m.id === mid); return m?.stadium || DEFAULT_STADIA[mid] || `${teamName(mid)} Park`; }
+// pitch-side hoardings — the league's proud commercial partners, rotating each week
+function adStrip(seed, n = 3) {
+  if (typeof AD_BOARDS === 'undefined' || !AD_BOARDS.length) return '';
+  let s = (seed * 2654435761) % 2147483648;
+  const pool = AD_BOARDS.map((_, i) => i);
+  const picks = [];
+  for (let k = 0; k < Math.min(n, pool.length); k++) {
+    s = (s * 1103515245 + 12345) % 2147483648;
+    picks.push(pool.splice(s % pool.length, 1)[0]);
+  }
+  return `<div class="ad-strip">${picks.map(i => {
+    const b = AD_BOARDS[i];
+    return `<span class="ad-board" style="color:${b.c};background:${b.bg}"><b>${b.t}</b><i>${b.s}</i></span>`;
+  }).join('')}</div>`;
+}
 // matchday attendance: deterministic per fixture, so every device reports the same crowd
 function attendance(a, b, i) {
   let s = a * 7919 + b * 104729 + i * 1299709;
@@ -2121,6 +2136,7 @@ function viewTeam() {
       const nameSpan = p => `<span class="pitch-name" ${browsing ? '' : `data-pcard="${p.id}" title="Tap for stats"`}>${esc(p.name)}</span>`;
       const pic = p => browsing ? kitImg(p.team, p.pos === 'GK') : kitImg(p.team, p.pos === 'GK', p);
       return `
+    ${adStrip(mid * 37 + gw)}
     <div class="pitch">
       ${['GK', 'DF', 'MF', 'FW'].map(pos => `
         <div class="pitch-row">
@@ -3019,6 +3035,7 @@ function showMatchup(a, b, i) {
       <p class="venue-line" style="flex:1;margin:0">GW${GAMEWEEKS[i].n} &middot; at ${esc(stadium(a))} &middot; Att ${attendance(a, b, i).toLocaleString()} &middot; ${gwStatus(i) === 'final' ? 'full time' : `${started ? 'in play' : 'projected'} &middot; ${Math.round(liveWinProb(a, b, i) * 100)}% – ${100 - Math.round(liveWinProb(a, b, i) * 100)}%`}</p>
       <button class="btn ghost small" id="muClose">&#10005;</button>
     </div>
+    ${adStrip(a * 1009 + b * 31 + i, 4)}
     <div class="mu-grid">${side(a)}${side(b)}</div>
     <p class="venue-line" style="margin-top:8px">${esc(chantFor(a, b, i))}</p>
   </div>`;

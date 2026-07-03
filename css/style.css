@@ -397,3 +397,14 @@ tr.st-red .pname { color: #ff9c9c; }
   .nav button { white-space: nowrap; flex: 0 0 auto; }
   .sync-area { order: 2; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
 }
+
+/* pitch-side advertising boards */
+.ad-strip { display: flex; gap: 6px; margin-bottom: 8px; }
+.ad-board {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; text-align: center; padding: 6px 8px; border-radius: 8px;
+  border: 1px solid rgba(255,255,255,.08);
+}
+.ad-board b { font-size: 11.5px; font-weight: 800; letter-spacing: .09em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.ad-board i { font-size: 9.5px; opacity: .8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+@media (max-width: 700px) { .ad-board i { display: none; } }
