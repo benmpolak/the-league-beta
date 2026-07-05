@@ -453,6 +453,15 @@ function nextOpp(club, gwN) {
   const opp = f.home === club ? f.away : f.home;
   return `${TEAM_BY_NAME[opp]?.short || opp} (${f.home === club ? 'H' : 'A'})`;
 }
+// fixture difficulty at a glance — green means get them on, red means brace
+const fdrCls = opp => { const s = TEAM_BY_NAME[opp]?.str || 1150; return s >= 1240 ? 'fdr-hard' : s <= 1100 ? 'fdr-easy' : ''; };
+// coloured fixture chip for the pitch views
+function nextOppHtml(club, gwN) {
+  const f = state.fixtures.find(f => f.gw === gwN && (f.home === club || f.away === club));
+  if (!f) return '—';
+  const opp = f.home === club ? f.away : f.home;
+  return `<span class="${fdrCls(opp)}">${esc(`${TEAM_BY_NAME[opp]?.short || opp} (${f.home === club ? 'H' : 'A'})`)}</span>`;
+}
 // clickable player name — opens the stats card, usable in any text row
 const pname = p => p ? `<span class="plink" data-pcard="${p.id}">${esc(p.name)}</span>` : '?';
 // expected points next gameweek: FPL's own projection, then points-per-game, then a guess
@@ -1363,7 +1372,7 @@ function render() {
 
   syncHash();
   // fresh page starts at the top; re-renders of the same page hold position
-  if (lastRenderedView !== state.view) { window.scrollTo(0, 0); lastRenderedView = state.view; }
+  if (lastRenderedView !== state.view) { window.scrollTo(0, 0); lastRenderedView = state.view; window.onscroll = null; }
   renderNav();
   renderSyncArea();
   let bar = $('#demoBar');
@@ -1466,8 +1475,19 @@ function renderIdentity() {
 function renderNav() {
   const nav = $('#nav');
   if (state.phase === 'setup') { nav.innerHTML = ''; return; }
+  // attention dots — the app taps you on the shoulder when it needs you
+  const dots = {};
+  if (state.phase === 'season' && whoami && whoami !== -1) {
+    const offers = toArr(state.trades).filter(t => t.status === 'pending' && t.to === whoami).length;
+    if (offers) dots.transfers = offers;
+    const cur = currentGwIndex();
+    if (!gwHasStarted(cur)) {
+      const crocked = lineupFor(whoami, cur).filter(pid => 'isnu'.includes(PLAYER_BY_ID[pid]?.status)).length;
+      if (crocked) dots.team = crocked;
+    }
+  }
   nav.innerHTML = NAV_ITEMS.map(([id, label]) =>
-    `<button data-view="${id}" class="${state.view === id ? 'active' : ''}">${label}</button>`).join('');
+    `<button data-view="${id}" class="${state.view === id ? 'active' : ''}">${label}${dots[id] ? `<span class="nav-dot" title="Needs your attention">${dots[id]}</span>` : ''}</button>`).join('');
   nav.querySelectorAll('button').forEach(b => b.onclick = () => { state.view = b.dataset.view; save(); render(); });
   // phones: the nav is a swipeable strip — keep the active tab in view
   if (nav.scrollWidth > nav.clientWidth) nav.querySelector('.active')?.scrollIntoView({ inline: 'center', block: 'nearest' });
@@ -1943,6 +1963,11 @@ function viewDraft() {
       <button class="btn ghost small" id="autoPick" title="Best available player, no thought required.">&#129302; Autopick</button>
     </div>
   </div>
+  <div class="clock-strip" id="clockStrip" style="display:none">
+    <span class="rec"></span> <b>${esc(managerName(mid))}</b> on the clock
+    ${state.settings.pickTimer ? '<span class="pick-clock" id="pickClock2">–:––</span>' : ''}
+    <span class="muted">Pick ${n + 1}/${totalPicks()}</span>
+  </div>
   <div class="order-strip">${draftOrderStrip()}</div>
   <div class="draft-layout">
     <div class="card">
@@ -2055,7 +2080,7 @@ function nextFx(team) {
 }
 // the full column menu, Draft Fantasy style; users pick their own set (kept per device)
 const ALL_STAT_COLS = live => [
-  { k: 'vs', h: 'Vs', t: 'Next fixture (H/A)', v: (m, p) => nextFx(p.team), cls: ' muted', sortable: false },
+  { k: 'vs', h: 'Vs', t: 'Next fixture (H/A) — coloured by how scary they are', v: (m, p) => { const t = nextFx(p.team); const opp = t.endsWith('(H)') || t.endsWith('(A)') ? Object.keys(TEAM_BY_NAME).find(n => TEAM_BY_NAME[n].short === t.slice(0, -4).trim()) : null; return opp ? `<span class="${fdrCls(opp)}">${t}</span>` : t; }, cls: ' muted', sortable: false },
   { k: 'price', h: '£m', t: 'Current FPL price', v: m => m.price.toFixed(1) },
   { k: 'apps', h: live ? 'Apps' : '90s', t: live ? 'Appearances' : 'Minutes ÷ 90, last season', v: m => m.apps },
   { k: 'min', h: 'MP', t: 'Minutes played', v: m => m.min },
@@ -2148,6 +2173,13 @@ let firedDeadline = 0;
 function bindDraft() {
   clearInterval(clockTimer);
   if (state.phase === 'season') return;
+  // pin a slim clock to the top once the big board scrolls out of sight
+  const oc = document.querySelector('.on-clock'), cs = $('#clockStrip');
+  if (oc && cs) {
+    const onScroll = () => { cs.style.display = oc.getBoundingClientRect().bottom < 0 ? 'flex' : 'none'; };
+    window.onscroll = onScroll;
+    onScroll();
+  }
   if (state.settings.pickTimer) {
     const mid = currentManagerId();
     const tw = $('#timewasteBtn');
@@ -2166,14 +2198,16 @@ function bindDraft() {
     }
     clockTimer = setInterval(() => {
       const el = $('#pickClock');
+      const el2 = $('#pickClock2'); // the pinned strip's mirror
       if (!el || state.phase !== 'draft') { clearInterval(clockTimer); return; }
       const bn = pickNo();
       const breakDue = drinksBreakAt(bn) && !(state.draft.breaksDone || []).includes(bn);
-      if (state.draft.paused) { el.textContent = 'PAUSED'; el.classList.remove('urgent'); return; }
+      if (state.draft.paused) { el.textContent = 'PAUSED'; el.classList.remove('urgent'); if (el2) el2.textContent = 'PAUSED'; return; }
       if (breakDue || $('#drinksBreak') || $('#ceremony')) return; // clock politely waits for pomp
       const left = Math.max(0, Math.round(((state.draft.deadline || 0) - Date.now()) / 1000));
       el.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
       el.classList.toggle('urgent', left <= 10);
+      if (el2) { el2.textContent = el.textContent; el2.classList.toggle('urgent', left <= 10); }
       if (left <= 0 && !state.draft.paused && state.draft.deadline && firedDeadline !== state.draft.deadline) {
         firedDeadline = state.draft.deadline;
         toast('Time! Autopick makes the call.');
@@ -2331,7 +2365,7 @@ function viewTeam() {
             <div class="pitch-chip ${statusClass(p)} ${teamView.pitchSel === p.id ? 'sel' : ''}" ${chipAttrs(p)}>
               ${pic(p)}
               ${nameSpan(p)}
-              ${!gwIsOver(gw) ? `<span class="pitch-vs">${esc(nextOpp(p.team, GAMEWEEKS[gw].n) || '—')}</span>` : `<span class="pitch-vs">${gwPlayerPoints(p.id, gw)} pts</span>`}
+              ${!gwIsOver(gw) ? `<span class="pitch-vs">${nextOppHtml(p.team, GAMEWEEKS[gw].n)}</span>` : `<span class="pitch-vs">${gwPlayerPoints(p.id, gw)} pts</span>`}
             </div>`).join('') || '<span class="muted" style="font-size:11px">—</span>'}
         </div>`).join('')}
     </div>
@@ -3268,7 +3302,7 @@ function showMatchup(a, b, i) {
       ${cameOn ? '<span class="sub-arrow in" title="Auto-sub — came on">&#9650;</span>' : ''}
       ${kitImg(p.team, p.pos === 'GK')}
       <span class="pitch-name">${esc(p.name)}</span>
-      ${pts != null ? `<span class="mu-pts">${pts}</span>` : `<span class="pitch-vs">${esc(nextOpp(p.team, GAMEWEEKS[i].n) || '')}</span>`}
+      ${pts != null ? `<span class="mu-pts">${pts}</span>` : `<span class="pitch-vs">${nextOppHtml(p.team, GAMEWEEKS[i].n)}</span>`}
     </div>`;
   };
   // the bench: unused subs in priority order, then anyone auto-subbed OUT
