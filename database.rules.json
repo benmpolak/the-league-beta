@@ -5,7 +5,28 @@
     "leagues": {
       "$league": {
         ".read": true,
-        ".write": "newData.exists() || !data.exists() || data.child('phase').val() === 'setup'"
+        ".write": "newData.exists() || !data.exists() || data.child('phase').val() === 'setup'",
+        "phase": { ".validate": "newData.isString() && (newData.val() === 'setup' || newData.val() === 'draft' || newData.val() === 'season')" },
+        "managers": { ".validate": "newData.hasChildren()" },
+        "settings": { ".validate": "newData.hasChildren()" },
+        "draft": { ".validate": "newData.hasChildren()" },
+        "lineups": { ".validate": "newData.hasChildren()" },
+        "transfers": { ".validate": "newData.hasChildren()" },
+        "trades": { ".validate": "newData.hasChildren()" },
+        "covenants": { ".validate": "newData.hasChildren()" },
+        "claims": { ".validate": "newData.hasChildren()" },
+        "waiverMeta": { ".validate": "newData.hasChildren()" },
+        "autolists": { ".validate": "newData.hasChildren()" },
+        "pins": { "$mid": { ".validate": "newData.isString()" } },
+        "adjustments": { "$pid": { ".validate": "newData.isNumber()" } },
+        "shirtNums": { ".validate": "newData.hasChildren()" },
+        "draftPool": { ".validate": "newData.hasChildren()" },
+        "windowDraft": { ".validate": "newData.hasChildren()" },
+        "tradeBlock": { ".validate": "newData.hasChildren()" },
+        "benchOrders": { ".validate": "newData.hasChildren()" },
+        "lobus": { "$mid": { ".validate": "newData.isNumber()" } },
+        "hamCup": { ".validate": "newData.hasChildren()" },
+        "$other": { ".validate": false }
       }
     }
   }

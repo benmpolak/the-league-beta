@@ -408,3 +408,13 @@ tr.st-red .pname { color: #ff9c9c; }
 .ad-board b { font-size: 11.5px; font-weight: 800; letter-spacing: .09em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .ad-board i { font-size: 9.5px; opacity: .8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 @media (max-width: 700px) { .ad-board i { display: none; } }
+
+/* the Vidiprinter tape */
+.vidi-tape {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px;
+  max-height: 240px; overflow-y: auto; background: #0a0e18;
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+}
+.vidi-line { padding: 3px 0; border-bottom: 1px dashed rgba(255,255,255,.06); color: #ffd98a; line-height: 1.5; }
+.vidi-line:last-child { border-bottom: none; }
+.vidi-when { color: var(--muted); font-size: 10px; margin-right: 4px; }
