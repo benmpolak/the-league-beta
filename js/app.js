@@ -1978,7 +1978,7 @@ function viewDraft() {
       ${state.settings.pickTimer ? `<button class="btn ghost small" id="timewasteBtn" title="Take it to the corner flag (+60s)">&#8987; Timewaste (${2 - (state.draft.timewastes?.[mid] || 0)} left)</button>` : ''}
       <button class="btn ghost small" id="undoPick" ${n === 0 ? 'disabled' : ''}>Undo last</button>
       ${(!netOn() || isCommissioner()) && state.settings.pickTimer ? `<button class="btn ghost small" id="pauseDraft">${state.draft.paused ? '&#9654; Resume' : '&#9208; Pause'}</button>` : ''}
-      <button class="btn ghost small" id="autoPick" title="Best available player, no thought required.">&#129302; Autopick</button>
+      <button class="btn ghost small" id="autoPick" title="Your autopick list first, then best available. Only the manager on the clock (or the Chairman) can press it.">&#129302; Autopick</button>
     </div>
   </div>
   <div class="clock-strip" id="clockStrip" style="display:none">
@@ -2274,7 +2274,16 @@ function bindDraft() {
       state.draft.picks.pop(); resetClock(); save(); render();
     }
   };
-  $('#autoPick').onclick = autoPick;
+  const apBtn = $('#autoPick');
+  if (apBtn) apBtn.onclick = () => {
+    // strictly the on-clock manager's call — their list, their pick. The
+    // Chairman can force it (DF's admin Force Pick) but gets the confirm.
+    const mid = currentManagerId();
+    if (mid == null) return;
+    if (!canActFor(mid)) { toast(`It's ${managerName(mid)}'s pick — the group chat is watching you`); return; }
+    if (!actGuard(mid, 'pick')) return;
+    autoPick();
+  };
 }
 function refreshPool() {
   const card = document.querySelector('.draft-layout .card');
