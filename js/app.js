@@ -3480,7 +3480,7 @@ function hamCupCard() {
       ${iAm ? `
       <h3 style="margin-top:12px">Your Ham XI <span class="tag">${mySel.length}/11</span> <span class="muted" style="font-weight:400;font-size:11px">1 GK &middot; 3–5 DF &middot; 2–5 MF &middot; 1–3 FW &middot; picked: ${cnt.GK} GK ${cnt.DF} DF ${cnt.MF} MF ${cnt.FW} FW</span></h3>
       ${picked.map(p => prow(p, true)).join('') || '<p class="muted" style="font-size:12px">Nobody yet. The Trough awaits.</p>'}
-      <input type="text" id="hamQ" placeholder="Search the Trough…" value="${esc(hamView.q)}" style="margin:8px 0">
+      <input type="text" id="hamQ" placeholder="Search the Trough…" value="${esc(hamView.q)}" style="margin:8px 0;width:100%;box-sizing:border-box">
       ${cands.map(p => prow(p, false)).join('')}
       <div style="display:flex;gap:8px;margin-top:10px;align-items:center">
         <button class="btn small" id="hamSave" ${shape ? '' : 'disabled'}>Enter this XI</button>
