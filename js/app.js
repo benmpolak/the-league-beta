@@ -162,7 +162,12 @@ function pushShared(path, val) {
   if (netOn()) window.WCSync.set(path, val).catch(e => console.warn('[sync] write failed', e));
 }
 function publishAll() {
-  if (netOn()) window.WCSync.setRoot(sharedSnapshot()).catch(e => console.warn('[sync] publish failed', e));
+  if (!netOn()) return;
+  // per-key writes — a device still running an older build can never clobber
+  // newer keys it doesn't know about (root set would silently drop them)
+  for (const k of SHARED_KEYS) {
+    window.WCSync.set(k, state[k] ?? null).catch(e => console.warn('[sync] publish failed', k, e));
+  }
 }
 const toArr = x => Array.isArray(x) ? x : (x ? Object.values(x) : []);
 
@@ -274,7 +279,14 @@ function freshState() {
     view: 'draft',
   };
 }
-function save() { if (!demoMode) localStorage.setItem(LS_KEY, JSON.stringify(state)); }
+function save() {
+  if (demoMode) return;
+  // stats and fixtures re-fetch from the feed on load — persisting them would
+  // balloon every save to multiple MB by spring and jank older phones
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify({ ...state, matchStats: {}, fixtures: [] }));
+  } catch (e) { console.warn('[save]', e); }
+}
 // last season's FPL points (falls back to price until the new season's data rolls in)
 const rating = p => p.rating || lastSeasonOf(p)?.pts || 0;
 
@@ -1274,6 +1286,7 @@ async function syncNow(manual = false) {
     ]);
     const stats = await statsRes.json();
     const fixtures = await fxRes.json();
+    state.feedGenerated = stats.generated || null; // for the stale-feed warning
     state.fixtures = fixtures
       .filter(f => f.date)
       .sort((a, b) => a.date.localeCompare(b.date));
@@ -1498,6 +1511,11 @@ function renderSyncArea() {
   if (!el || state.phase === 'setup') { if (el) el.innerHTML = ''; return; }
   const bits = [];
   if (anyMatchLive()) bits.push('<span class="live-pill"><span class="rec"></span>LIVE</span>');
+  // the feed going quiet on a matchday should be visible, not discovered
+  if (state.feedGenerated && anyMatchLive()) {
+    const ageH = (Date.now() - new Date(state.feedGenerated).getTime()) / 3600000;
+    if (ageH > 1.5) bits.push(`<span class="tag" style="background:#4a3a10;color:#ffd98a" title="The stats feed normally refreshes every 15 minutes on matchdays. Scores may be lagging.">&#9888; feed ${ageH < 2 ? '90m' : Math.round(ageH) + 'h'} stale</span>`);
+  }
   if (syncOn()) {
     bits.push(`<span class="conn ${syncConnected ? 'up' : ''}" title="${syncConnected ? 'Live sync: connected' : 'Live sync: reconnecting — changes will queue'}">&#9679;</span>`);
     const who = whoami === -1 ? 'Spectating' : (whoami ? esc(managerName(whoami)) : 'Who are you?');
@@ -2209,6 +2227,9 @@ function bindDraft() {
       el.classList.toggle('urgent', left <= 10);
       if (el2) { el2.textContent = el.textContent; el2.classList.toggle('urgent', left <= 10); }
       if (left <= 0 && !state.draft.paused && state.draft.deadline && firedDeadline !== state.draft.deadline) {
+        // twelve open consoles must not all fire the deadline pick — when the
+        // league is live, only the commissioner's device makes the call
+        if (netOn() && !isCommissioner()) return;
         firedDeadline = state.draft.deadline;
         toast('Time! Autopick makes the call.');
         autoPick(true);
@@ -4228,8 +4249,26 @@ if (new URLSearchParams(location.search).has('demo')) enterDemo();
 setTimeout(() => {
   if (netOn() && isCommissioner() && waiverRunDue()) processWaivers(false);
 }, 4000);
-// auto-sync on load during the tournament (max once per 20 min, always if live)
+// auto-sync on load during the tournament (max once per 20 min, always if live,
+// and always when stats aren't in memory — saves no longer persist them)
 if (state.phase === 'season') {
   const stale = !state.lastSync || (Date.now() - new Date(state.lastSync).getTime()) > 20 * 60 * 1000;
-  if (stale || anyMatchLive()) syncNow(false);
+  if (stale || anyMatchLive() || !Object.keys(state.matchStats || {}).length) syncNow(false);
 }
+// stale-build watchdog: long-lived tabs and home-screen installs reload
+// themselves when a new version ships (never mid-draft — draft night is sacred)
+let appBuildTag = null;
+async function checkBuild() {
+  try {
+    const r = await fetch('js/app.js', { method: 'HEAD', cache: 'no-store' });
+    const tag = r.headers.get('etag') || r.headers.get('last-modified');
+    if (!tag) return;
+    if (appBuildTag === null) { appBuildTag = tag; return; }
+    if (tag !== appBuildTag && state.phase !== 'draft' && !document.querySelector('.overlay')) {
+      toast('New club shop stock — updating…');
+      setTimeout(() => location.reload(), 1500);
+    }
+  } catch { /* offline — try again next cycle */ }
+}
+checkBuild();
+setInterval(checkBuild, 10 * 60 * 1000);
