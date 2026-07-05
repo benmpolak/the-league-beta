@@ -1,7 +1,7 @@
 // Realtime sync layer — Firebase Realtime Database (free Spark tier)
 // Loads as a module after app.js; app.js works standalone if this never loads.
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
-import { getDatabase, ref, onValue, set, runTransaction } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js';
+import { getDatabase, ref, onValue, set, update, runTransaction } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js';
 
 const app = initializeApp({
   databaseURL: 'https://calciopoli-wc26-default-rtdb.europe-west1.firebasedatabase.app',
@@ -13,6 +13,8 @@ const base = `leagues/${LEAGUE}`;
 window.WCSync = {
   set: (path, val) => set(ref(db, `${base}/${path}`), val),
   setRoot: val => set(ref(db, base), val),
+  // atomic multi-key write: one snapshot, no partial states, unlisted keys kept
+  update: obj => update(ref(db, base), obj),
   txn: (path, fn) => runTransaction(ref(db, `${base}/${path}`), fn),
 };
 

@@ -158,20 +158,39 @@ function sharedSnapshot() {
   for (const k of SHARED_KEYS) o[k] = state[k];
   return o;
 }
+let cloudSeeded = false; // has the cloud ever shown us a real league?
 function pushShared(path, val) {
-  if (netOn()) window.WCSync.set(path, val).catch(e => console.warn('[sync] write failed', e));
+  if (!netOn()) return;
+  // a subpath write into an EMPTY cloud would create a fragment-league that
+  // every device then mistakes for the whole truth (goodbye squadSize,
+  // goodbye scoring). Seed the full state first, exactly once.
+  if (!cloudSeeded) { cloudSeeded = true; publishAll(); return; }
+  window.WCSync.set(path, val).catch(e => console.warn('[sync] write failed', e));
 }
 function publishAll() {
   if (!netOn()) return;
-  // per-key writes — a device still running an older build can never clobber
-  // newer keys it doesn't know about (root set would silently drop them)
-  for (const k of SHARED_KEYS) {
-    window.WCSync.set(k, state[k] ?? null).catch(e => console.warn('[sync] publish failed', k, e));
-  }
+  // one atomic multi-key update: every device sees a single complete snapshot
+  // (sequential per-key writes let clients glimpse half a league), and keys an
+  // older build doesn't know about are left untouched rather than dropped
+  const o = {};
+  for (const k of SHARED_KEYS) o[k] = state[k] ?? null;
+  const w = window.WCSync.update ? window.WCSync.update(o) : window.WCSync.setRoot(o);
+  w.catch(e => console.warn('[sync] publish failed', e));
 }
 const toArr = x => Array.isArray(x) ? x : (x ? Object.values(x) : []);
 
+// Firebase fires snapshots SYNCHRONOUSLY on local writes — if we applied them
+// inline, a function pushing several keys would have its own half-echoed state
+// wipe its later writes (the first waiver run of a season would silently undo
+// itself). Defer by a tick and only apply the freshest snapshot.
+let _snapLatest, _snapQueued = false;
 window.onSharedSnapshot = data => {
+  _snapLatest = data;
+  if (_snapQueued) return;
+  _snapQueued = true;
+  setTimeout(() => { _snapQueued = false; applySharedSnapshot(_snapLatest); }, 0);
+};
+function applySharedSnapshot(data) {
   if (SYNC_OFF || demoMode) return;
   if (!data) {
     // cloud league is empty. Only the commissioner's device may repopulate it;
@@ -194,7 +213,22 @@ window.onSharedSnapshot = data => {
     render();
     return;
   }
+  cloudSeeded = true;
   data.managers = toArr(data.managers);
+  // a partial or vandalised snapshot must never blank the club list — the
+  // twelve names are constitutional
+  if (!data.managers.length) delete data.managers;
+  // settings arrive merged over the defaults — a fragment can tweak values
+  // but can never delete squadSize or the scoring table out from under us
+  if (data.settings !== undefined) {
+    const d = freshState().settings;
+    data.settings = {
+      ...d, ...data.settings,
+      scoring: { ...d.scoring, ...(data.settings.scoring || {}) },
+      posMin: { ...d.posMin, ...(data.settings.posMin || {}) },
+      posMax: { ...d.posMax, ...(data.settings.posMax || {}) },
+    };
+  }
   data.draft = data.draft || {};
   data.draft.order = toArr(data.draft.order);
   data.draft.picks = toArr(data.draft.picks);
@@ -696,6 +730,9 @@ function setClaims(mid, arr) {
 // commissioner-only: resolve all pending claims, then open the Trough
 function processWaivers(manual = false) {
   if (netOn() && !isCommissioner()) { toast('Only the Chairman runs waivers'); return; }
+  // stamp the run at its START: players dropped DURING the run land after it,
+  // so they go back on waivers until the next one — no instant snipes
+  const runStart = Date.now() - 1;
   const cur = currentGwIndex();
   const claimsByMid = state.claims?.[cur] || {};
   const queue = waiverOrder(cur); // reverse standings — weekly reset
@@ -726,10 +763,10 @@ function processWaivers(manual = false) {
     }
   }
   state.claims[cur] = {};
-  state.waiverMeta = { ...state.waiverMeta, lastRun: new Date().toISOString() };
+  state.waiverMeta = { ...state.waiverMeta, lastRun: new Date(runStart).toISOString() };
+  pushShared('transfers', state.transfers); // the moves first — they're the truth
   pushShared(`claims/${cur}`, null);
   pushShared('waiverMeta', state.waiverMeta);
-  pushShared('transfers', state.transfers);
   for (const mid of touchedLineups) pushShared(`lineups/${mid}/${cur}`, state.lineups[mid][cur]);
   save(); render();
   toast(executed.length
