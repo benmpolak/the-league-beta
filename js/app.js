@@ -1299,6 +1299,46 @@ async function syncNow(manual = false) {
   if (anyMatchLive()) liveTimer = setTimeout(() => syncNow(false), 5 * 60 * 1000);
 }
 
+/* ---------------- browser history: back/forward walk the tabs ----------------
+   Each view change pushes #view; popstate swaps the view back. Pop-overs
+   (player card, matchup) push their own entry so the back button closes
+   them instead of leaving the page — the phone-native expectation. */
+let hashInit = false;
+let ovDepth = 0;        // history entries currently representing open pop-overs
+let ovSkipClose = false; // set when a pop-over closed itself and fired history.back()
+function syncHash() {
+  if (state.phase === 'setup') return;
+  const want = `#${state.view}`;
+  if (location.hash === want) return;
+  try {
+    hashInit ? history.pushState(null, '', want) : history.replaceState(null, '', want);
+  } catch { /* file:// — no history, no problem */ }
+  hashInit = true;
+}
+function pushOvState() {
+  try { history.pushState({ ov: ++ovDepth }, '', location.hash); } catch { ovDepth--; }
+}
+function closeOv(el) {
+  el.remove();
+  if (history.state && history.state.ov) {
+    ovSkipClose = true;
+    try { history.back(); } catch { ovSkipClose = false; }
+  }
+}
+window.addEventListener('popstate', () => {
+  if (ovDepth > 0) {
+    ovDepth--;
+    if (ovSkipClose) { ovSkipClose = false; return; }
+    const ovs = document.querySelectorAll('.overlay');
+    if (ovs.length) ovs[ovs.length - 1].remove();
+    return;
+  }
+  const v = location.hash.slice(1);
+  if (state.phase !== 'setup' && v && v !== state.view && NAV_ITEMS.some(([k]) => k === v)) {
+    state.view = v; save(); render();
+  }
+});
+
 /* ---------------- views ---------------- */
 const NAV_ITEMS = [
   ['dash', 'Dashboard'],
@@ -1313,6 +1353,7 @@ const NAV_ITEMS = [
   ['settings', 'Settings'],
 ];
 
+let lastRenderedView = null;
 function render() {
   // keep keyboard focus across re-renders (remote updates land mid-typing)
   const ae = document.activeElement;
@@ -1320,6 +1361,9 @@ function render() {
   let caret = null;
   try { caret = focusId && ae.selectionStart != null ? ae.selectionStart : null; } catch { caret = null; }
 
+  syncHash();
+  // fresh page starts at the top; re-renders of the same page hold position
+  if (lastRenderedView !== state.view) { window.scrollTo(0, 0); lastRenderedView = state.view; }
   renderNav();
   renderSyncArea();
   let bar = $('#demoBar');
@@ -3035,10 +3079,13 @@ function crystalBallCard(standings) {
   </div>`;
 }
 /* ----- the week's awards, auto-issued ----- */
-function awardsCard() {
+// the week's honours, computed once — feeds the awards card AND the Minutes
+function lastFinalGw() {
   let last = -1;
   for (let i = 0; i < REGULAR_GWS; i++) if (gwStatus(i) === 'final') last = i;
-  if (last < 0) return '';
+  return last;
+}
+function weeklyAwards(last) {
   const scores = state.managers.map(m => ({ id: m.id, s: gwManagerPoints(m.id, last), waste: benchWaste(m.id, last) }));
   const hi = [...scores].sort((a, b) => b.s - a.s)[0];
   const lo = [...scores].sort((a, b) => a.s - b.s)[0];
@@ -3068,10 +3115,17 @@ function awardsCard() {
     }
   }
   const handfulBits = h => [h.s.g ? `${h.s.g} goal${h.s.g > 1 ? 's' : ''}` : '', h.s.yc ? `${h.s.yc} yellow${h.s.yc > 1 ? 's' : ''}` : '', h.s.rc ? 'a red' : '', h.s.pm ? 'a missed pen' : ''].filter(Boolean).join(', ');
+  return { hi, lo, jammy, robbed, hiding, bench, handful, nffb, handfulBits, ownerAt };
+}
+function awardsCard() {
+  const last = lastFinalGw();
+  if (last < 0) return '';
+  const { hi, lo, jammy, robbed, hiding, bench, handful, nffb, handfulBits, ownerAt } = weeklyAwards(last);
   const ownTag = pid => { const o = ownerAt(+pid); return o ? ` <span class="muted">(${esc(teamName(o.id))})</span>` : ' <span class="muted">(the Trough)</span>'; };
   const row = (icon, label, text) => `<div class="lrow" style="font-size:12.5px"><span style="width:22px">${icon}</span><b style="min-width:150px">${label}</b><span>${text}</span></div>`;
   return `<div class="card" style="margin-top:14px">
-    <h2>GW${GAMEWEEKS[last].n} — The Committee's Awards <span class="muted" style="font-weight:400;font-size:12px">issued automatically, disputed endlessly</span></h2>
+    <h2>GW${GAMEWEEKS[last].n} — The Committee's Awards <span class="muted" style="font-weight:400;font-size:12px">issued automatically, disputed endlessly</span>
+      <button class="btn ghost small" id="copyMinutes" style="margin-left:auto" title="WhatsApp-ready gameweek recap">&#128203; Copy the Minutes</button></h2>
     ${row('&#127942;', 'Manager of the Week', `<b>${esc(teamName(hi.id))}</b> — ${hi.s} points`)}
     ${row('&#129348;', 'The Wooden Spoon', `<b>${esc(teamName(lo.id))}</b> — ${lo.s} points`)}
     ${jammy ? row('&#127808;', 'Jammiest Win', `<b>${esc(teamName(jammy.w))}</b> won with just ${jammy.ws}`) : ''}
@@ -3103,8 +3157,46 @@ function lobusCard() {
     <p class="muted" style="font-size:10.5px;margin-top:6px">Declare from any of your players' cards — open, declare, regret. Changeable until GW1 kicks off.${bonus ? ` Lobus bonus: <b style="color:var(--text)">+${bonus}</b> any week your starting Lobus scores or assists.` : ' Bonus points: pending Committee approval (Settings).'}</p>
   </div>`;
 }
+/* ----- the Committee Minutes: one tap, WhatsApp-ready recap ----- */
+function committeeMinutes(last) {
+  const g = GAMEWEEKS[last];
+  const { hi, lo, jammy, robbed, hiding, bench, handful, nffb, handfulBits } = weeklyAwards(last);
+  const L = [`\u{1F3C6} THE LEAGUE — GW${g.n} COMMITTEE MINUTES`, '', '*Results*'];
+  for (const [a, b] of pairingsFor(last)) {
+    const sa = gwManagerPoints(a, last), sb = gwManagerPoints(b, last);
+    const na = sa > sb ? `*${teamName(a)}*` : teamName(a);
+    const nb = sb > sa ? `*${teamName(b)}*` : teamName(b);
+    L.push(`${na} ${sa}–${sb} ${nb}`);
+  }
+  L.push('', "*The Committee's Awards*");
+  L.push(`\u{1F3C6} Manager of the Week: ${teamName(hi.id)} (${hi.s})`);
+  L.push(`\u{1F944} Wooden Spoon: ${teamName(lo.id)} (${lo.s})`);
+  if (jammy) L.push(`\u{1F340} Jammiest Win: ${teamName(jammy.w)} won with just ${jammy.ws}`);
+  if (robbed) L.push(`\u{1F494} Robbed: ${teamName(robbed.l)} scored ${robbed.ls} and still lost`);
+  if (hiding) L.push(`\u{1F528} Biggest Hiding: ${teamName(hiding.w)} ${hiding.ws}–${hiding.ls} ${teamName(hiding.l)}`);
+  if (bench.waste > 0) L.push(`\u{1FAD1} Bench of the Week: ${teamName(bench.id)} left ${bench.waste} on the bench`);
+  if (handful) L.push(`\u{1F43A} "He's A Handful™": ${handful.p.name} — ${handfulBits(handful)}`);
+  if (nffb) L.push(`\u{1F9B5} No-Footed Full Back: ${nffb.p.name} — the full 90, nothing to declare`);
+  const t = h2hStandings(false);
+  L.push('', '*The Table*');
+  t.slice(0, 4).forEach((r, i) => L.push(`${i + 1}. ${r.team || r.name} — ${r.pts}`));
+  const bottom = t[t.length - 1];
+  L.push('…', `${t.length}. ${bottom.team || bottom.name} — ${bottom.pts} \u{1F96B}`);
+  L.push('', 'Minutes recorded automatically. Disputes to the group chat, where they will be enjoyed.');
+  L.push('https://benmpolak.github.io/the-league/');
+  return L.join('\n');
+}
 function bindDash() {
   document.querySelectorAll('[data-goto]').forEach(b => b.onclick = () => { state.view = b.dataset.goto; save(); render(); });
+  const cm = $('#copyMinutes');
+  if (cm) cm.onclick = () => {
+    const last = lastFinalGw();
+    if (last < 0) return;
+    const txt = committeeMinutes(last);
+    (navigator.clipboard?.writeText(txt) || Promise.reject()).then(
+      () => toast('Minutes copied — paste straight into the chat'),
+      () => { window.prompt('Copy the Minutes:', txt); });
+  };
   const tm = $('#trmMore');
   if (tm) tm.onclick = () => { trmShowAll = !trmShowAll; render(); };
   document.querySelectorAll('[data-mu]').forEach(el => el.onclick = () => {
@@ -3162,6 +3254,7 @@ function playoffCard() {
 /* ----- fixture matchup: side-by-side pitches, Draft Fantasy style ----- */
 let muView = 'pitch';
 function showMatchup(a, b, i) {
+  const reopening = !!$('#muOverlay'); // pitch/table toggle re-renders in place
   $('#muOverlay')?.remove();
   const started = gwStatus(i) !== 'upcoming';
   const effInfo = {};
@@ -3226,10 +3319,11 @@ function showMatchup(a, b, i) {
     <div class="mu-grid">${side(a)}${side(b)}</div>
     <p class="venue-line" style="margin-top:8px">${esc(chantFor(a, b, i))}</p>
   </div>`;
-  ov.onclick = e => { if (e.target === ov || e.target.id === 'muClose') ov.remove(); };
+  ov.onclick = e => { if (e.target === ov || e.target.id === 'muClose') closeOv(ov); };
   ov.querySelector('#muPitch').onclick = e => { e.stopPropagation(); muView = 'pitch'; showMatchup(a, b, i); };
   ov.querySelector('#muTable').onclick = e => { e.stopPropagation(); muView = 'table'; showMatchup(a, b, i); };
   document.body.appendChild(ov);
+  if (!reopening) pushOvState(); // phone back button closes the matchup, not the site
 }
 let h2hView = { gw: null };
 function bindH2H() {
@@ -4010,8 +4104,9 @@ function showPlayerCard(pid) {
     <div id="pcardActions" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px"></div>
     <p class="muted" style="font-size:10.5px;margin-top:8px">League pts use our scoring (no bonus). FPL official shown for arguments.</p>
   </div>`;
-  ov.onclick = e => { if (e.target === ov || e.target.id === 'pcardClose') ov.remove(); };
+  ov.onclick = e => { if (e.target === ov || e.target.id === 'pcardClose') closeOv(ov); };
   document.body.appendChild(ov);
+  pushOvState(); // phone back button closes the card, not the site
   // context actions — the card is a place to DO things, not just read them
   const acts = ov.querySelector('#pcardActions');
   const btn = (label, fn, ghost = false) => {
@@ -4087,6 +4182,11 @@ document.addEventListener('click', e => {
 }, true);
 
 /* ---------------- boot ---------------- */
+// a #hash deep-link (or a restored tab) opens straight onto that page
+{
+  const v0 = location.hash.slice(1);
+  if (state.phase !== 'setup' && NAV_ITEMS.some(([k]) => k === v0)) state.view = v0;
+}
 render();
 // ?demo drops visitors straight into the demo season
 if (new URLSearchParams(location.search).has('demo')) enterDemo();

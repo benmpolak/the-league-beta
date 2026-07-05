@@ -1,0 +1,14 @@
+{
+  "name": "The League — 2026/27",
+  "short_name": "The League",
+  "description": "Twelve managers. One title. Est. 2015.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0d1526",
+  "theme_color": "#0d1526",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
