@@ -67,3 +67,33 @@ themselves. Never point them at the real league key.
   Pages can be re-enabled on any fork in minutes.
 - **Mid-draft disaster**: the draft state is in Firebase and localStorage on every
   device — reload and carry on. The Chairman has Pause and Undo-last-pick.
+
+## Known limitations (honest list)
+Found in a four-way deep audit (Jul 2026). The league-breakers were all fixed;
+these three are deliberately deferred because they need bigger changes or can't
+be tested until the situation arises. None affects a normal single-gameweek week.
+
+- **Double gameweeks** score appearance / goals-conceded / saves off the FPL
+  feed's *combined* two-match total, so a player who plays two full games gets
+  2 appearance points, not 4 (goals, assists, cards, clean sheets are correct).
+  Fix needs `fetch_fpl.py` to store per-fixture stats and `statPoints` to sum
+  per match — do it and test against a real DGW before the first one (~GW20+).
+- **Manual point adjustments** (Settings) currently only nudge the cosmetic
+  season-points total, not H2H results. To make a stat correction actually
+  change a result it needs to be per-gameweek and folded into `gwPlayerPoints`.
+  Until then, prefer fixing the source: the feed self-corrects on the next sync.
+- **A fully-postponed gameweek** (zero stats ever recorded) would leave the
+  playoffs/cup waiting on it. Rare, but if it happens the commissioner can
+  advance things manually. Worth a proper "void this GW" control before it bites.
+
+## Deploying the database rules
+`database.rules.json` is deployed separately from the site (GitHub Pages only
+serves static files). After editing it:
+```
+npx firebase-tools deploy --only database
+```
+IMPORTANT: `SHARED_KEYS` in `js/app.js` and the per-key rules in
+`database.rules.json` must stay in lockstep — a multi-key `publishAll()` write
+is all-or-nothing, so a key present in one but not the other silently breaks
+every publish. Verify a deploy with `node test/e2e.multiclient.js` (it exercises
+every write path against the live rules on a throwaway league).
