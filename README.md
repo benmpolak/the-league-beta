@@ -49,6 +49,7 @@ node test/sim.test.js                  # full 26/27 season, 57 checks (offline e
 node test/e2e.multiclient.js           # 3 real browsers vs live Firebase (throwaway league) — port 8140
 node test/race.test.js                 # simultaneous-write races — port 8142
 node test/stress.test.js               # 8 clients, scrambles, offline/reconnect — port 8143
+node test/dgw.test.js                  # double-gameweek per-fixture scoring (real GW26 data)
 ```
 The live-Firebase suites use `leagues/the-league-e2e-test` and clean up after
 themselves. Never point them at the real league key.
@@ -70,14 +71,9 @@ themselves. Never point them at the real league key.
 
 ## Known limitations (honest list)
 Found in a four-way deep audit (Jul 2026). The league-breakers were all fixed;
-these three are deliberately deferred because they need bigger changes or can't
-be tested until the situation arises. None affects a normal single-gameweek week.
+these two are deferred because they need bigger changes or can't be tested until
+the situation arises. Neither affects a normal single-gameweek week.
 
-- **Double gameweeks** score appearance / goals-conceded / saves off the FPL
-  feed's *combined* two-match total, so a player who plays two full games gets
-  2 appearance points, not 4 (goals, assists, cards, clean sheets are correct).
-  Fix needs `fetch_fpl.py` to store per-fixture stats and `statPoints` to sum
-  per match — do it and test against a real DGW before the first one (~GW20+).
 - **Manual point adjustments** (Settings) currently only nudge the cosmetic
   season-points total, not H2H results. To make a stat correction actually
   change a result it needs to be per-gameweek and folded into `gwPlayerPoints`.

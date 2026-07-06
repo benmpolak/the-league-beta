@@ -128,13 +128,20 @@ def main():
         if not (ev['finished'] or ev['is_current'] or (ev.get('data_checked'))):
             continue
         live = get(f'{BASE}/event/{ev["id"]}/live/')
+        # FPL identifier -> our short key, for reading the per-fixture `explain`
+        EXPLAIN_MAP = {
+            'minutes': 'min', 'goals_scored': 'g', 'assists': 'a',
+            'clean_sheets': 'cs', 'goals_conceded': 'gc', 'own_goals': 'og',
+            'penalties_saved': 'ps', 'penalties_missed': 'pm',
+            'yellow_cards': 'yc', 'red_cards': 'rc', 'saves': 'sv',
+        }
         stats = {}
         for el in live['elements']:
             s = el['stats']
             if s['minutes'] == 0 and not any([s['yellow_cards'], s['red_cards']]):
                 continue
             started = s.get('starts', 1 if s['minutes'] >= 60 else 0)
-            stats[el['id']] = {
+            row = {
                 'min': s['minutes'],
                 'st': 1 if started else 0,
                 'sub': 1 if (s['minutes'] > 0 and not started) else 0,
@@ -149,6 +156,23 @@ def main():
                 'rc': s['red_cards'],
                 'sv': s['saves'],
             }
+            # double gameweek: the aggregate above mis-scores per-match rules
+            # (appearance, goals-conceded per 2, saves per 3). Store each fixture
+            # separately so the app can score match-by-match and sum. Any stat
+            # absent from a fixture's explain scored 0 that match, so 0 is right.
+            explain = el.get('explain') or []
+            if len(explain) >= 2:
+                fx = []
+                for ex in explain:
+                    fs = {'min': 0, 'g': 0, 'a': 0, 'cs': 0, 'gc': 0, 'og': 0,
+                          'ps': 0, 'pm': 0, 'yc': 0, 'rc': 0, 'sv': 0}
+                    for st in ex.get('stats', []):
+                        k = EXPLAIN_MAP.get(st['identifier'])
+                        if k:
+                            fs[k] = st['value']
+                    fx.append(fs)
+                row['fx'] = fx
+            stats[el['id']] = row
         gws[str(ev['id'])] = {'finished': ev['finished'], 'stats': stats}
 
     (ROOT / 'data' / 'stats.json').write_text(json.dumps({

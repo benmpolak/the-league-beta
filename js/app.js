@@ -1156,6 +1156,10 @@ function xiValid(pids) {
 // raw FPL gameweek stats -> league points, per the editable scoring table.
 // FPL's cs/gc stats already respect the 60-minute / on-pitch rules.
 function statPoints(player, s) {
+  // double gameweek: score each fixture on its own and sum, so appearance
+  // (per match), goals-conceded (per 2 per match) and saves (per 3 per match)
+  // are all right — the GW aggregate would halve appearances and mis-floor the rest
+  if (s && s.fx && s.fx.length > 1) return s.fx.reduce((t, f) => t + statPoints(player, f), 0);
   const sc = state.settings.scoring;
   const goalPts = { GK: sc.goalGK, DF: sc.goalDF, MF: sc.goalMF, FW: sc.goalFW }[player.pos] ?? sc.goalFW;
   const min = s.min ?? ((s.st || s.sub) ? 90 : 0);
