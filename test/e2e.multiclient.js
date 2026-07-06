@@ -111,13 +111,17 @@ async function newClient(browser, whoami) {
     const someone = PLAYERS.filter(pl => !draftedIds().has(pl.id) && canPick(mid, pl))[0];
     if (!someone) return { skip: true };
     makePick(someone.id); // unforced — must bounce
-    const btn = document.querySelector('[data-pick]:not([disabled])');
-    return { skip: false, before, after: state.draft.picks.length, poolButtonsLocked: !btn };
+    // buttons are no longer disabled (mobile can't tap-explain a disabled
+    // button); clicking one when it's not your turn must toast and NOT pick
+    window.confirm = () => true; // if a confirm somehow fires, accept it
+    const btn = document.querySelector('[data-pick]');
+    if (btn) btn.click();
+    return { skip: false, before, after: state.draft.picks.length };
   });
   await sleep(600);
   const turnBlockConfirm = await A.evaluate(n => state.draft.picks.length === n, turnBlock.before ?? 0);
-  check("B cannot pick on someone else's turn (engine + pool buttons)",
-    turnBlock.skip || (turnBlock.before === turnBlock.after && turnBlock.poolButtonsLocked && turnBlockConfirm));
+  check("B cannot pick on someone else's turn (engine + pool click both bounce)",
+    turnBlock.skip || (turnBlock.before === turnBlock.after && turnBlockConfirm));
 
   // march the draft to B's turn via real commissioner force-picks, then B
   // autopicks from HIS ranked list and it lands on every device

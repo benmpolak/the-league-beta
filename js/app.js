@@ -1616,6 +1616,7 @@ function render() {
   renderIdentity();
   maybeDrinksBreak();
   broadcastOnPick();
+  if (typeof manageWakeLock === 'function') manageWakeLock(); // acquire/release as the draft starts/ends
   if (focusId) {
     const el = document.getElementById(focusId);
     if (el) {
@@ -1634,10 +1635,18 @@ async function claimIdentity(mid) {
   if (mid !== -1 && state.pins?.[mid]) {
     const pin = prompt(`PIN for ${managerName(mid)}:`);
     if (pin == null) return false;
-    if (await pinHash(mid, pin.trim()) !== state.pins[mid]) { toast('Wrong PIN. The Committee has logged this attempt.'); return false; }
+    if (await pinHash(mid, pin.trim()) !== state.pins[mid]) { toast(`Wrong PIN. Forgotten it? Ask ${managerName(state.managers[0]?.id)} to reset it.`); return false; }
   } else if (mid !== -1 && netOn()) {
-    // first sign-in: a PIN is required — it's what stops Tussie acting as you
-    const pin = prompt(`First sign-in for ${managerName(mid)} — set a PIN (4+ digits). You'll use it on any device.`);
+    // never set a PIN before the cloud has loaded — a pre-snapshot device has
+    // empty pins and would treat a returning manager as a first sign-in,
+    // overwriting their real PIN
+    if (!cloudKnown) { toast('Still loading the league — give it a second and tap your team again.'); return false; }
+    if (state.pins?.[mid]) return claimIdentity(mid); // PIN arrived while we waited — take the PIN path
+    // confirm WHO you are before setting a PIN — a mis-tap otherwise locks the
+    // real manager out of their own identity
+    const m = state.managers.find(x => x.id === mid);
+    if (!confirm(`You're claiming ${m.team} — ${m.name}. Is that you? (Wrong team? Cancel and pick again.)`)) return false;
+    const pin = prompt(`First sign-in for ${m.name} — set a PIN (4+ digits). You'll use it on any device.`);
     if (!pin || pin.trim().length < 4) { toast('A PIN (4+ digits) is required to sign in.'); return false; }
     (state.pins = state.pins || {})[mid] = await pinHash(mid, pin.trim());
     pushShared(`pins/${mid}`, state.pins[mid]);
@@ -2161,10 +2170,25 @@ function viewDraft() {
   const taken = draftedIds();
   const teamsOpts = [...TEAMS].sort((a, b) => a.name.localeCompare(b.name)).map(t => `<option value="${esc(t.name)}" ${poolFilter.team === t.name ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
 
+  // personal state: is it MY pick, and if not, how many picks until it is?
+  const iAmUp = netOn() && whoami && whoami !== -1 && mid === whoami;
+  const picksUntilMine = (() => {
+    if (!netOn() || !whoami || whoami === -1 || iAmUp) return null;
+    const m = state.managers.length;
+    for (let k = 1; k <= m * 2; k++) {
+      const nn = n + k, round = Math.floor(nn / m), idx = nn % m;
+      const who = round % 2 === 0 ? state.draft.order[idx] : state.draft.order[m - 1 - idx];
+      if (who === whoami) return k;
+    }
+    return null;
+  })();
+  const whoLine = iAmUp
+    ? `<span style="color:var(--accent)">YOU'RE ON THE CLOCK</span>`
+    : `${esc(managerName(mid))} is on the clock${picksUntilMine ? ` &middot; <span style="color:var(--text)">your pick in ${picksUntilMine}${state.settings.pickTimer ? ` (~${Math.ceil(picksUntilMine * state.settings.pickTimer / 60)} min)` : ''}</span>` : ''}`;
   return `
-  <div class="on-clock">
+  <div class="on-clock${iAmUp ? ' me-up' : ''}">
     <div>
-      <div class="who">${esc(managerName(mid))} — you're on the clock</div>
+      <div class="who">${whoLine}</div>
       <div class="pick-meta">Pick ${n + 1} of ${totalPicks()} &middot; Round ${round} of ${state.settings.squadSize}${(() => {
         // every round has a title sponsor (ledger #5) — the hydration break was never in danger
         const sp = typeof AD_BOARDS !== 'undefined' && AD_BOARDS.length ? AD_BOARDS[(round - 1) % AD_BOARDS.length] : null;
@@ -2376,7 +2400,7 @@ function poolTable() {
         <td><span class="pos-badge pos-${p.pos}">${p.pos}</span></td>
         <td>${statusChip(p)}</td>
         ${cols.map(c => `<td class="num${c.cls || ''}">${c.v(metricsFor(p), p)}</td>`).join('')}
-        <td style="white-space:nowrap"><button class="btn small" data-pick="${p.id}" ${canPick(mid, p) && canActFor(mid) ? '' : `disabled title="${canActFor(mid) ? 'Position limits hit' : `${esc(managerName(mid))} is on the clock, not you`}"`}>Draft</button>${whoami && whoami !== -1 ? `<button class="btn ghost small" data-auto="${p.id}" title="Add to my autopick list">&#9734;</button>` : ''}</td>
+        <td style="white-space:nowrap"><button class="btn small${canPick(mid, p) && canActFor(mid) ? '' : ' dim'}" data-pick="${p.id}">Draft</button>${whoami && whoami !== -1 ? `<button class="btn ghost small" data-auto="${p.id}" title="Add to my autopick list">&#9734;</button>` : ''}</td>
       </tr>`).join('')}
     </tbody>
   </table>
@@ -2425,13 +2449,20 @@ function bindDraft() {
       el.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
       el.classList.toggle('urgent', left <= 10);
       if (el2) { el2.textContent = el.textContent; el2.classList.toggle('urgent', left <= 10); }
-      if (left <= 0 && !state.draft.paused && state.draft.deadline && firedDeadline !== state.draft.deadline) {
-        // twelve open consoles must not all fire the deadline pick — when the
-        // league is live, only the commissioner's device makes the call
-        if (netOn() && !isCommissioner()) return;
-        firedDeadline = state.draft.deadline;
-        toast('Time! Autopick makes the call.');
-        autoPick(true);
+      if (!state.draft.paused && state.draft.deadline && firedDeadline !== state.draft.deadline) {
+        // the commissioner's device fires at 0:00; if his phone slept, the
+        // on-clock manager's OWN device fires after an 8s grace. The pick
+        // transaction is idempotent, so a double-fire is harmless — this just
+        // guarantees the draft never stalls on one sleeping screen.
+        const overBy = -left; // seconds past the deadline
+        const iAmCommish = !netOn() || isCommissioner();
+        const iAmOnClock = netOn() && currentManagerId() === whoami;
+        const mayFire = (overBy >= 0 && iAmCommish) || (overBy >= 8 && iAmOnClock);
+        if (overBy >= 0 && mayFire) {
+          firedDeadline = state.draft.deadline;
+          toast('Time! Autopick makes the call.');
+          autoPick(true);
+        }
       }
     }, 400);
   }
@@ -2495,7 +2526,17 @@ function refreshPool() {
   q.setSelectionRange(q.value.length, q.value.length);
 }
 function bindPoolTable() {
-  document.querySelectorAll('[data-pick]').forEach(b => b.onclick = () => makePick(+b.dataset.pick));
+  document.querySelectorAll('[data-pick]').forEach(b => b.onclick = () => {
+    const pid = +b.dataset.pick, mid = currentManagerId(), p = PLAYER_BY_ID[pid];
+    // explain, don't dead-tap: a disabled-looking button now says why (tooltips
+    // don't exist on touch — the #1 "it's broken" generator on phones)
+    if (!canActFor(mid)) { toast(`${managerName(mid)} is on the clock — not you.`); return; }
+    if (!canPick(mid, p)) { toast(`Can't fit another ${p.pos} — your squad's full at that position.`); return; }
+    // one confirm before an instant, commissioner-only-undo pick (rows shift as
+    // other picks land, so a mis-tap is easy)
+    if (!confirm(`Draft ${p.name} (${p.club} ${p.pos}) — pick #${pickNo() + 1}?`)) return;
+    makePick(pid);
+  });
   document.querySelectorAll('[data-auto]').forEach(b => b.onclick = () => {
     if (!whoami || whoami === -1) return;
     const pid = +b.dataset.auto;
@@ -4474,12 +4515,36 @@ document.addEventListener('click', e => {
 }, true);
 
 /* ---------------- boot ---------------- */
+// keep the commissioner's screen awake through the draft so the deadline
+// autopick keeps firing (phones suspend timers on a locked screen). If the
+// browser refuses, the on-clock manager's fallback autopick covers it.
+let _wakeLock = null;
+async function manageWakeLock() {
+  try {
+    if (state.phase === 'draft' && !document.hidden && 'wakeLock' in navigator && !_wakeLock) {
+      _wakeLock = await navigator.wakeLock.request('screen');
+      _wakeLock.addEventListener('release', () => { _wakeLock = null; });
+    } else if ((state.phase !== 'draft' || document.hidden) && _wakeLock) {
+      await _wakeLock.release(); _wakeLock = null;
+    }
+  } catch { /* unsupported/denied — fallback autopick handles it */ }
+}
+// reopening a backgrounded phone must refresh: pull fresh scores on matchday,
+// re-arm the wake lock, and reconcile any league change that landed while away
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  manageWakeLock();
+  if (state.phase === 'season' && netOn()) syncNow(false);
+  if (_snapSeen && netOn() && !demoMode) applySharedSnapshot(_snapLatest);
+});
+
 // a #hash deep-link (or a restored tab) opens straight onto that page
 {
   const v0 = location.hash.slice(1);
   if (state.phase !== 'setup' && NAV_ITEMS.some(([k]) => k === v0)) state.view = v0;
 }
 render();
+manageWakeLock();
 // ?demo drops visitors straight into the demo season
 if (new URLSearchParams(location.search).has('demo')) enterDemo();
 // commissioner devices run overdue scheduled waivers automatically — but only
