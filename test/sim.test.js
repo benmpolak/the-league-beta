@@ -136,16 +136,19 @@ const check = (label, ok, detail = '') => {
         out.checks.loserGotNothing = !state.transfers.slice(before).some(t => t.inId === target.id && t.managerId === lo);
       } else { out.checks.contestedToTopOfQueue = true; out.checks.loserGotNothing = true; }
 
-      // a trough stroll: someone signs a free agent the moment waivers clear
+      // a trough stroll: someone signs a free agent the moment waivers clear.
+      // Transfers take effect from the next unplayed GW (transferGw), so the
+      // sign must reckon ownership there — exactly as the real handler does.
       const m6 = state.managers[6].id;
-      const owned1 = ownedIdsAt(gw);
+      const tg = transferGw();
+      const owned1 = ownedIdsAt(tg);
       const pick = PLAYERS.filter(x => !owned1.has(x.id) && !onWaivers(x) && !arrivalLocked(x)).sort((a, b) => rating(b) - rating(a))
-        .find(x => [...squadAt(m6, gw)].some(d => squadShapeOk([...squadAt(m6, gw).filter(q => q.id !== d.id), x])));
+        .find(x => [...squadAt(m6, tg)].some(d => squadShapeOk([...squadAt(m6, tg).filter(q => q.id !== d.id), x])));
       if (pick) {
-        const drop = [...squadAt(m6, gw)].sort((a, b) => rating(a) - rating(b)).find(d => squadShapeOk([...squadAt(m6, gw).filter(q => q.id !== d.id), pick]));
-        state.transfers.push({ managerId: m6, outId: drop.id, inId: pick.id, gw, n: state.transfers.length + 1, t: Date.now() });
-        const lu = state.lineups[m6]?.[gw];
-        if (lu) state.lineups[m6][gw] = lu.filter(id => id !== drop.id);
+        const drop = [...squadAt(m6, tg)].sort((a, b) => rating(a) - rating(b)).find(d => squadShapeOk([...squadAt(m6, tg).filter(q => q.id !== d.id), pick]));
+        state.transfers.push({ managerId: m6, outId: drop.id, inId: pick.id, gw: tg, n: state.transfers.length + 1, t: Date.now() });
+        const lu = state.lineups[m6]?.[tg];
+        if (lu) state.lineups[m6][tg] = lu.filter(id => id !== drop.id);
       }
       out.checks.troughSignHappened = !!pick;
 
@@ -231,22 +234,28 @@ const check = (label, ok, detail = '') => {
     acc.click();
     await new Promise(r => setTimeout(r, 150));
     whoami = state.managers[0].id;
+    const tg = transferGw(); // the trade takes effect from the next unplayed GW
     return {
       twoForTwo: give.length === 2,
-      aHasBoth: get.every(pid => squadAt(mid, cur).some(x => x.id === pid)),
-      bHasBoth: give.every(pid => squadAt(other, cur).some(x => x.id === pid)),
-      sizes: [squadAt(mid, cur).length, squadAt(other, cur).length],
-      legal: squadShapeOk(squadAt(mid, cur)) && squadShapeOk(squadAt(other, cur)),
+      aHasBoth: get.every(pid => squadAt(mid, tg).some(x => x.id === pid)),
+      bHasBoth: give.every(pid => squadAt(other, tg).some(x => x.id === pid)),
+      sizes: [squadAt(mid, tg).length, squadAt(other, tg).length],
+      legal: squadShapeOk(squadAt(mid, tg)) && squadShapeOk(squadAt(other, tg)),
     };
   });
   check('2-for-2 trade via UI swaps both squads, sizes hold',
     tradeOk.skip || (tradeOk.twoForTwo && tradeOk.aHasBoth && tradeOk.bHasBoth && tradeOk.legal && tradeOk.sizes.every(s => s === 14)), JSON.stringify(tradeOk));
 
-  // ---------- 5. the Window Draft ----------
+  // ---------- 5. the Window Draft (a mid-season January event) ----------
   const wd = await p.evaluate(async () => {
-    // three new faces arrive after draft night
-    const owned = ownedIdsAt(currentGwIndex());
-    const newbies = PLAYERS.filter(x => !owned.has(x.id)).sort((a, b) => rating(b) - rating(a)).slice(0, 3);
+    // put the clock mid-season so signings resolve to a normal in-season GW,
+    // not the end-of-season → playoff boundary
+    const jan = (new Date(GAMEWEEKS[19].from).getTime() + new Date(GAMEWEEKS[19].to).getTime()) / 2;
+    Date.now = () => jan;
+    // three new faces arrive after draft night — genuinely unowned both now
+    // (so they count as locked) and at the GW the window draft operates on
+    const ownedNow = ownedIdsAt(currentGwIndex()), ownedTg = ownedIdsAt(transferGw());
+    const newbies = PLAYERS.filter(x => !ownedNow.has(x.id) && !ownedTg.has(x.id)).sort((a, b) => rating(b) - rating(a)).slice(0, 3);
     for (const nb of newbies) delete state.draftPool.ids[nb.id];
     transfersView.tab = 'trough'; render();
     await new Promise(r => setTimeout(r, 100));
@@ -262,9 +271,10 @@ const check = (label, ok, detail = '') => {
     const actor = wdActor();
     const outSel = document.querySelector('#wdOut');
     let signed = false;
+    const tg = transferGw(); // window-draft signings apply from the next unplayed GW
     for (const inBtn of document.querySelectorAll('[data-wdin]')) {
       const inP = PLAYER_BY_ID[+inBtn.dataset.wdin];
-      const drop = squadAt(actor, currentGwIndex()).find(d => squadShapeOk([...squadAt(actor, currentGwIndex()).filter(q => q.id !== d.id), inP]));
+      const drop = squadAt(actor, tg).find(d => squadShapeOk([...squadAt(actor, tg).filter(q => q.id !== d.id), inP]));
       if (!drop) continue;
       outSel.value = drop.id;
       inBtn.click();

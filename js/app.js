@@ -110,6 +110,11 @@ function currentGwIndex() {
 }
 const gwIsOver = i => GAMEWEEKS[i].finished || Date.now() > new Date(GAMEWEEKS[i].to).getTime();
 const gwHasStarted = i => Date.now() > new Date(gwFrom(i)).getTime();
+// which gameweek a transfer takes effect in: NEVER the one already being
+// played. A Tuesday waiver run happens inside the just-finished GW's window,
+// so its signings must count for the NEXT gameweek, or they'd retroactively
+// rescore a settled result (the worst bug a 12-year league could have).
+const transferGw = () => { const c = currentGwIndex(); return Math.min(c + (gwHasStarted(c) ? 1 : 0), GAMEWEEKS.length - 1); };
 // stats for a gameweek land under key 'gw{n}' — no date-window matching needed
 const gwEvent = i => state.matchStats[`gw${GAMEWEEKS[i].n}`];
 // round robin (circle method): 11 unique rounds for 12 managers, repeated three times
@@ -158,17 +163,24 @@ function sharedSnapshot() {
   for (const k of SHARED_KEYS) o[k] = state[k];
   return o;
 }
-let cloudSeeded = false; // has the cloud ever shown us a real league?
+// two facts about the shared cloud, learned only from the server itself:
+let cloudKnown = false;   // have we received the first snapshot (any value)?
+let cloudHasData = false; // does the cloud currently hold a real league?
 function pushShared(path, val) {
   if (!netOn()) return;
-  // a subpath write into an EMPTY cloud would create a fragment-league that
-  // every device then mistakes for the whole truth (goodbye squadSize,
-  // goodbye scoring). Seed the full state first, exactly once.
-  if (!cloudSeeded) { cloudSeeded = true; publishAll(); return; }
+  // NEVER write before the server has told us what's out there. A device that
+  // was backgrounded for weeks could otherwise blast its stale state over a
+  // live 12-year league on the first tap. Drop the write; the imminent
+  // snapshot re-renders the true state and the user simply acts again.
+  if (!cloudKnown) return;
+  // cloud is genuinely empty (a real reset): only the Chairman may seed it, and
+  // he seeds the WHOLE state so no device ever mistakes a fragment for truth.
+  if (!cloudHasData) { if (isCommissioner()) publishAll(); return; }
   window.WCSync.set(path, val).catch(e => console.warn('[sync] write failed', e));
 }
 function publishAll() {
   if (!netOn()) return;
+  cloudKnown = true; cloudHasData = true; // we're about to make the cloud hold a full league
   // one atomic multi-key update: every device sees a single complete snapshot
   // (sequential per-key writes let clients glimpse half a league), and keys an
   // older build doesn't know about are left untouched rather than dropped
@@ -224,7 +236,9 @@ window.onSharedSnapshot = data => {
 };
 function applySharedSnapshot(data) {
   if (SYNC_OFF || demoMode) return;
+  cloudKnown = true; // the server has now spoken — writes are safe from here
   if (!data) {
+    cloudHasData = false;
     // cloud league is empty. Only the commissioner's device may repopulate it;
     // everyone else treats empty cloud as the truth (so a deliberate reset sticks).
     if (state.phase !== 'setup') {
@@ -245,7 +259,7 @@ function applySharedSnapshot(data) {
     render();
     return;
   }
-  cloudSeeded = true;
+  cloudHasData = true;
   data.managers = toArr(data.managers);
   // a partial or vandalised snapshot must never blank the club list — the
   // twelve names are constitutional
@@ -289,7 +303,18 @@ function applySharedSnapshot(data) {
   data.waiverMeta = data.waiverMeta || { lastRun: null, control: 'auto' };
   data.adjustments = data.adjustments || {};
   data.shirtNums = data.shirtNums || {};
-  for (const k of SHARED_KEYS) if (data[k] !== undefined) state[k] = data[k];
+  // Firebase strips empty arrays/objects, so a live windowDraft comes back
+  // missing picks/order — restore them or the first sign throws on .push
+  if (data.windowDraft) {
+    data.windowDraft.order = toArr(data.windowDraft.order);
+    data.windowDraft.picks = toArr(data.windowDraft.picks);
+  }
+  // the snapshot is the COMPLETE league (we listen on the whole node), so a
+  // key absent from it has been deleted upstream — reset it to its default
+  // rather than clinging to a stale local copy (that's how a cancelled Ham
+  // Cup or cleared trade-block used to linger forever on other devices)
+  const defaults = freshState();
+  for (const k of SHARED_KEYS) state[k] = data[k] !== undefined ? data[k] : defaults[k];
   if (!state.settings.posMin) state.settings.posMin = { GK: 1, DF: 3, MF: 3, FW: 1 };
   if (!state.settings.posMax) state.settings.posMax = { GK: 2, DF: 6, MF: 6, FW: 4 };
   save(); render();
@@ -738,22 +763,45 @@ function wdActor() {
   const lap = Math.floor(wd.turn / ord.length), i = wd.turn % ord.length;
   return lap % 2 === 0 ? ord[i] : ord[ord.length - 1 - i];
 }
-function wdAdvance(passed) {
-  const wd = state.windowDraft;
-  wd.passes = passed ? (wd.passes || 0) + 1 : 0;
-  wd.turn++;
-  if (wd.passes >= wd.order.length || !lockedArrivals().length) { wdFinish(); return; }
-  pushShared('windowDraft', state.windowDraft);
-  save(); render();
+// turn / passes / picks are shared bookkeeping written by whoever's on the
+// clock AND the Chairman — a transaction stops two devices clobbering each
+// other and rewinding the draft. newPick (if any) is appended atomically.
+const wdMutate = wd => {
+  if (!wd) return undefined;
+  wd.order = toArr(wd.order); wd.picks = toArr(wd.picks);
+  return wd;
+};
+function wdAdvance(passed, newPick = null) {
+  const apply = wd => {
+    wdMutate(wd);
+    if (newPick) wd.picks.push(newPick);
+    wd.passes = passed ? (wd.passes || 0) + 1 : 0;
+    wd.turn = (wd.turn || 0) + 1;
+    return wd;
+  };
+  const after = () => {
+    save(); render();
+    if (state.windowDraft && (state.windowDraft.passes >= toArr(state.windowDraft.order).length || !lockedArrivals().length)) wdFinish();
+  };
+  if (!netOn()) { state.windowDraft = apply(state.windowDraft); after(); return; }
+  window.WCSync.txn('windowDraft', wd => apply(wd || undefined)).then(res => {
+    const wd = wdMutate(res.snapshot.val());
+    if (wd) state.windowDraft = wd;
+    after();
+  }).catch(e => console.warn('[wd]', e));
 }
 function wdFinish() {
-  if (state.windowDraft) state.windowDraft = { ...state.windowDraft, status: 'done' };
-  // refresh the snapshot: every remaining arrival unlocks into the Trough
-  state.draftPool = { at: Date.now(), ids: Object.fromEntries(PLAYERS.map(p => [p.id, p.club])) };
-  pushShared('windowDraft', state.windowDraft);
-  pushShared('draftPool', state.draftPool);
-  save(); render();
-  toast('The window business is done — anyone left is loose in the Trough.');
+  if (state.windowDraft?.status === 'done') return;
+  const done = () => {
+    if (state.windowDraft) state.windowDraft = { ...state.windowDraft, status: 'done' };
+    // refresh the snapshot: every remaining arrival unlocks into the Trough
+    state.draftPool = { at: Date.now(), ids: Object.fromEntries(PLAYERS.map(p => [p.id, p.club])) };
+    pushShared('draftPool', state.draftPool);
+    save(); render();
+    toast('The window business is done — anyone left is loose in the Trough.');
+  };
+  if (!netOn()) { done(); return; }
+  window.WCSync.txn('windowDraft', wd => wd ? { ...wd, status: 'done' } : undefined).then(done).catch(e => console.warn('[wd]', e));
 }
 function myClaims(mid) { return toArr(state.claims?.[currentGwIndex()]?.[mid]); }
 function setClaims(mid, arr) {
@@ -769,11 +817,14 @@ function processWaivers(manual = false) {
   // so they go back on waivers until the next one — no instant snipes
   const runStart = Date.now() - 1;
   const cur = currentGwIndex();
+  const tgw = transferGw(); // winning claims take effect next unplayed GW
   const preLen = state.transfers.length;
-  const claimsByMid = state.claims?.[cur] || {};
+  // sweep EVERY un-run claim bucket up to now (oldest first) so a claim lodged
+  // between a Friday run and the Saturday deadline isn't orphaned by the index flip
+  const buckets = Object.keys(state.claims || {}).map(Number).filter(g => g <= cur).sort((a, b) => a - b);
   const queue = waiverOrder(cur); // reverse standings — weekly reset
   const pending = {};
-  for (const mid of queue) pending[mid] = [...toArr(claimsByMid[mid])];
+  for (const mid of queue) { pending[mid] = []; for (const g of buckets) pending[mid].push(...toArr(state.claims[g]?.[mid])); }
   const executed = [];
   const touchedLineups = new Set();
   let progressed = true;
@@ -784,12 +835,12 @@ function processWaivers(manual = false) {
       while (pending[mid].length) {
         const c = pending[mid].shift();
         const inP = PLAYER_BY_ID[c.in];
-        if (!inP || ownedIdsAt(cur).has(c.in)) continue;              // gone — try next claim
-        if (!managerSquad(mid).some(x => x.id === c.out)) continue;   // out-player no longer theirs
-        if (!squadShapeOk([...squadAt(mid, cur).filter(x => x.id !== c.out), inP])) continue;
-        state.transfers.push({ managerId: mid, outId: c.out, inId: c.in, gw: cur, n: state.transfers.length + 1, t: Date.now(), waiver: true });
-        const lu = state.lineups[mid]?.[cur];
-        if (lu) { state.lineups[mid][cur] = lu.filter(id => id !== c.out); touchedLineups.add(mid); }
+        if (!inP || ownedIdsAt(tgw).has(c.in)) continue;                      // gone — try next claim
+        if (!squadAt(mid, tgw).some(x => x.id === c.out)) continue;           // out-player no longer theirs
+        if (!squadShapeOk([...squadAt(mid, tgw).filter(x => x.id !== c.out), inP])) continue;
+        state.transfers.push({ managerId: mid, outId: c.out, inId: c.in, gw: tgw, n: state.transfers.length + 1, t: Date.now(), waiver: true });
+        const lu = state.lineups[mid]?.[tgw];
+        if (lu) { state.lineups[mid][tgw] = lu.filter(id => id !== c.out); touchedLineups.add(mid); }
         executed.push({ mid, in: c.in, out: c.out });
         queue.splice(qi, 1); queue.push(mid); // winner drops to the back
         progressed = true;
@@ -798,24 +849,40 @@ function processWaivers(manual = false) {
       if (progressed) break;
     }
   }
-  state.claims[cur] = {};
-  state.waiverMeta = { ...state.waiverMeta, lastRun: new Date(runStart).toISOString() };
-  // merge the executions transactionally — anyone who signed from the Trough
-  // mid-run keeps their move, and their player can't be waivered over
+  // capture the exact values to publish BEFORE any await — an in-flight
+  // snapshot must not revert them out from under the write
+  const stampedMeta = { ...state.waiverMeta, lastRun: new Date(runStart).toISOString() };
+  const prevMeta = state.waiverMeta;
+  state.waiverMeta = stampedMeta; // stamp locally NOW so onWaivers reads true immediately
   const newRecs = state.transfers.slice(preLen);
   state.transfers = state.transfers.slice(0, preLen); // the txn re-adds them authoritatively
   txnArray('transfers', arr => {
     const out = [...arr];
     for (const r of newRecs) {
-      const owned = ownedIdsGiven(out, cur);
+      const owned = ownedIdsGiven(out, tgw);
       if (owned.has(r.inId) || !owned.has(r.outId)) continue; // sniped mid-run
       out.push({ ...r, n: out.length + 1 });
     }
     return out;
-  }).then(() => {
-    pushShared(`claims/${cur}`, null);
-    pushShared('waiverMeta', state.waiverMeta);
-    for (const mid of touchedLineups) pushShared(`lineups/${mid}/${cur}`, state.lineups[mid][cur]);
+  }).then(ok => {
+    if (ok === false) { // the write failed — undo the stamp, keep the claims
+      state.waiverMeta = prevMeta;
+      state.transfers = state.transfers.concat(newRecs); // keep local view honest
+      toast('Waivers hit a snag sending — nothing was cleared. Try the run again.');
+      render();
+      return;
+    }
+    for (const g of buckets) state.claims[g] = {};
+    // clear the swept buckets and stamp the run in ONE atomic snapshot
+    if (netOn() && window.WCSync.update) {
+      const upd = { waiverMeta: stampedMeta };
+      for (const g of buckets) upd[`claims/${g}`] = null;
+      window.WCSync.update(upd).catch(e => console.warn('[waivers] clear failed', e));
+    } else {
+      for (const g of buckets) pushShared(`claims/${g}`, null);
+      pushShared('waiverMeta', stampedMeta);
+    }
+    for (const mid of touchedLineups) pushShared(`lineups/${mid}/${tgw}`, state.lineups[mid][tgw]);
     save(); render();
     toast(executed.length
       ? `Waivers processed — ${executed.map(e => `${managerName(e.mid)} lands ${PLAYER_BY_ID[e.in]?.name}`).join(', ')}. The Trough is open.`
@@ -879,26 +946,26 @@ function respondTrade(id, accept) {
       .then(() => toast('Trade rejected. Nothing personal. (It was personal.)'));
     return;
   }
-  const cur = currentGwIndex();
+  const tgw = transferGw(); // effect from the next unplayed GW — never rescore history
   const give = tGive(tr), get = tGet(tr);
   // quick local screen for a friendly message; the binding check re-runs
   // inside the transaction against whatever the server holds at that moment
   const giveSet = new Set(give), getSet = new Set(get);
-  const fromAfter = [...squadAt(tr.from, cur).filter(p => !giveSet.has(p.id)), ...get.map(pid => PLAYER_BY_ID[pid])];
-  const toAfter = [...squadAt(tr.to, cur).filter(p => !getSet.has(p.id)), ...give.map(pid => PLAYER_BY_ID[pid])];
+  const fromAfter = [...squadAt(tr.from, tgw).filter(p => !giveSet.has(p.id)), ...get.map(pid => PLAYER_BY_ID[pid])];
+  const toAfter = [...squadAt(tr.to, tgw).filter(p => !getSet.has(p.id)), ...give.map(pid => PLAYER_BY_ID[pid])];
   if (!squadShapeOk(fromAfter) || !squadShapeOk(toAfter)) {
     toast('Trade would break a squad\'s position limits'); return;
   }
   txnArray('transfers', arr => {
-    const fromIds = squadIdsGiven(tr.from, arr, cur), toIds = squadIdsGiven(tr.to, arr, cur);
+    const fromIds = squadIdsGiven(tr.from, arr, tgw), toIds = squadIdsGiven(tr.to, arr, tgw);
     if (give.some(pid => !fromIds.has(pid)) || get.some(pid => !toIds.has(pid))) return null; // someone moved on
     const fa = [...fromIds].filter(pid => !giveSet.has(pid)).concat(get).map(pid => PLAYER_BY_ID[pid]);
     const ta = [...toIds].filter(pid => !getSet.has(pid)).concat(give).map(pid => PLAYER_BY_ID[pid]);
     if (!squadShapeOk(fa) || !squadShapeOk(ta)) return null;
     const out = [...arr];
     for (let k = 0; k < give.length; k++) {
-      out.push({ managerId: tr.from, outId: give[k], inId: get[k], gw: cur, n: out.length + 1, t: Date.now(), trade: true });
-      out.push({ managerId: tr.to, outId: get[k], inId: give[k], gw: cur, n: out.length + 1, t: Date.now(), trade: true });
+      out.push({ managerId: tr.from, outId: give[k], inId: get[k], gw: tgw, n: out.length + 1, t: Date.now(), trade: true });
+      out.push({ managerId: tr.to, outId: get[k], inId: give[k], gw: tgw, n: out.length + 1, t: Date.now(), trade: true });
     }
     return out;
   }).then(ok => {
@@ -909,14 +976,14 @@ function respondTrade(id, accept) {
     }
     setTradeStatus(id, 'done');
     if (tr.terms) {
-      const covenant = { id: tr.id + '-cov', from: tr.from, to: tr.to, text: tr.terms, t: Date.now(), gw: GAMEWEEKS[cur].n };
+      const covenant = { id: tr.id + '-cov', from: tr.from, to: tr.to, text: tr.terms, t: Date.now(), gw: GAMEWEEKS[currentGwIndex()].n };
       txnArray('covenants', arr => arr.some(c => c && c.id === covenant.id) ? null : [...arr, covenant]);
     }
     for (const [m2, gone] of [[tr.from, give], [tr.to, get]]) {
-      const lu = state.lineups[m2]?.[cur];
+      const lu = state.lineups[m2]?.[tgw];
       if (lu) {
-        state.lineups[m2][cur] = lu.filter(pid => !gone.includes(pid));
-        pushShared(`lineups/${m2}/${cur}`, state.lineups[m2][cur]);
+        state.lineups[m2][tgw] = lu.filter(pid => !gone.includes(pid));
+        pushShared(`lineups/${m2}/${tgw}`, state.lineups[m2][tgw]);
       }
     }
     save(); render();
@@ -1077,11 +1144,15 @@ function statPoints(player, s) {
   pts += (s.g || 0) * goalPts + (s.a || 0) * sc.assist;
   pts += (s.og || 0) * sc.ownGoal + (s.pm || 0) * sc.penMiss;
   pts += (s.yc || 0) * sc.yellow + (s.rc || 0) * sc.red;
+  // clean-sheet points require 60+ minutes (real FPL/DF rule) — a defender
+  // subbed at half-time gets nothing even if his team keeps the sheet. The
+  // gate lives here so it's correct no matter how the feed reports cs.
+  const cs60 = min >= 60 ? (s.cs || 0) : 0;
   if (player.pos === 'GK' || player.pos === 'DF') {
-    pts += (s.cs || 0) * sc.cleanSheet;
+    pts += cs60 * sc.cleanSheet;
     pts += Math.floor((s.gc || 0) / 2) * sc.per2Conceded;
   }
-  if (player.pos === 'MF') pts += (s.cs || 0) * sc.cleanSheetMF;
+  if (player.pos === 'MF') pts += cs60 * sc.cleanSheetMF;
   if (player.pos === 'GK') pts += Math.floor((s.sv || 0) / 3) * sc.per3Saves + (s.ps || 0) * sc.penSave;
   return pts;
 }
@@ -2873,21 +2944,21 @@ function bindTransfers() {
     const outId = +($('#wdOut')?.value || 0);
     if (!outId) { toast('Pick who goes out first'); return; }
     const inP = PLAYER_BY_ID[+b.dataset.wdin];
-    if (!squadShapeOk([...squadAt(actor, cur).filter(x => x.id !== outId), inP])) { toast('Breaks the squad position limits'); return; }
+    const tgw = transferGw();
+    if (!squadShapeOk([...squadAt(actor, tgw).filter(x => x.id !== outId), inP])) { toast('Breaks the squad position limits'); return; }
     txnArray('transfers', arr => {
-      const owned = ownedIdsGiven(arr, cur);
+      const owned = ownedIdsGiven(arr, tgw);
       if (owned.has(inP.id) || !owned.has(outId)) return null;
-      return [...arr, { managerId: actor, outId, inId: inP.id, gw: cur, n: arr.length + 1, t: Date.now(), windowDraft: true }];
+      return [...arr, { managerId: actor, outId, inId: inP.id, gw: tgw, n: arr.length + 1, t: Date.now(), windowDraft: true }];
     }).then(ok => {
       if (!ok) { toast(`${inP.name} is already spoken for — pick again.`); render(); return; }
-      const lu = state.lineups[actor]?.[cur];
+      const lu = state.lineups[actor]?.[tgw];
       if (lu) {
-        state.lineups[actor][cur] = lu.filter(id => id !== outId);
-        pushShared(`lineups/${actor}/${cur}`, state.lineups[actor][cur]);
+        state.lineups[actor][tgw] = lu.filter(id => id !== outId);
+        pushShared(`lineups/${actor}/${tgw}`, state.lineups[actor][tgw]);
       }
-      state.windowDraft.picks.push({ mid: actor, in: inP.id, out: outId });
       toast(`${inP.name} signed in the Window Draft. ${PLAYER_BY_ID[outId]?.name} makes way.`);
-      wdAdvance(false);
+      wdAdvance(false, { mid: actor, in: inP.id, out: outId });
     });
   });
   // --- waivers & the Trough ---
@@ -2993,22 +3064,25 @@ function bindTransfers() {
           toast(`Claim lodged: ${inP.name}. Resolves when waivers run.`);
           return;
         }
-        if (!squadShapeOk([...squadAt(mid, cur).filter(x => x.id !== outId), inP])) { toast('Breaks the squad position limits'); return; }
+        const tgw = transferGw();
+        if (!squadShapeOk([...squadAt(mid, tgw).filter(x => x.id !== outId), inP])) { toast('Breaks the squad position limits'); return; }
         // first come, first served — settled by a transaction, not by luck
         txnArray('transfers', arr => {
-          const owned = ownedIdsGiven(arr, cur);
+          const owned = ownedIdsGiven(arr, tgw);
           if (owned.has(inId) || !owned.has(outId)) return null; // beaten to him
-          return [...arr, { managerId: mid, outId, inId, gw: cur, n: arr.length + 1, t: Date.now() }];
+          return [...arr, { managerId: mid, outId, inId, gw: tgw, n: arr.length + 1, t: Date.now() }];
         }).then(ok => {
           if (!ok) { toast(`${inP.name} was signed seconds before you got there. The Trough is cruel.`); render(); return; }
-          const lu = state.lineups[mid]?.[cur];
+          // only ever strip the OUT player from the target (unplayed) GW's XI —
+          // never a gameweek already scored
+          const lu = state.lineups[mid]?.[tgw];
           if (lu) {
-            state.lineups[mid][cur] = lu.filter(id => id !== outId);
-            pushShared(`lineups/${mid}/${cur}`, state.lineups[mid][cur]);
+            state.lineups[mid][tgw] = lu.filter(id => id !== outId);
+            pushShared(`lineups/${mid}/${tgw}`, state.lineups[mid][tgw]);
           }
           transfersView.out = null;
           save(); render();
-          toast(`${inP.name} signed from the Trough. First come, first served.`);
+          toast(`${inP.name} signed from the Trough${tgw !== cur ? ` — in for GW${GAMEWEEKS[tgw].n}` : ''}. First come, first served.`);
         });
       });
     }
