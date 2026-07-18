@@ -247,6 +247,8 @@ input:focus, select:focus { border-color: var(--accent-dim); }
   background: #3a1f24; border-top: 1px solid var(--red); color: #ffb4b2;
   font-size: 13px; font-weight: 700; padding: 10px 16px;
 }
+.sandbox-bar { background: #3a2e14; border-top-color: #d4a017; color: #ffd76e; }
+.sandbox-bar .rec { background: #d4a017; }
 .rules-p { font-size: 13.5px; line-height: 1.55; margin-bottom: 10px; color: var(--text); }
 .pundit-strip { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .pundit-chip {

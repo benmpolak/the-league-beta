@@ -1,7 +1,11 @@
 /* ================= The League — 2026/27 ================= */
 'use strict';
 
-const LS_KEY = 'tl2627-league';
+// ?sandbox → practice league: own Firebase node (see sync.js) + own device storage,
+// so testing never touches the real league's cloud state or this phone's saved identity
+const SANDBOX = new URLSearchParams(location.search).has('sandbox');
+const LS_NS = SANDBOX ? 'tl2627sb' : 'tl2627';
+const LS_KEY = `${LS_NS}-league`;
 
 const TEAM_BY_NAME = Object.fromEntries(TEAMS.map(t => [t.name, t]));
 const PLAYER_BY_ID = Object.fromEntries(PLAYERS.map(p => [p.id, p]));
@@ -138,7 +142,7 @@ let state = load() || freshState();
 
 /* ---------------- multiplayer (Firebase sync) ---------------- */
 const SYNC_OFF = new URLSearchParams(location.search).has('nosync');
-const WHO_KEY = 'tl2627-whoami';
+const WHO_KEY = `${LS_NS}-whoami`;
 let whoami = +localStorage.getItem(WHO_KEY) || null; // manager id, -1 = spectator
 let syncConnected = false;
 let demoMode = false;
@@ -252,12 +256,12 @@ function applySharedSnapshot(data) {
           publishAll();
         } else {
           state = freshState();
-          localStorage.removeItem('tl2627-ceremony-seen');
+          localStorage.removeItem(`${LS_NS}-ceremony-seen`);
           save();
         }
       } else {
         state = freshState();
-        localStorage.removeItem('tl2627-ceremony-seen');
+        localStorage.removeItem(`${LS_NS}-ceremony-seen`);
         save();
       }
     }
@@ -324,8 +328,8 @@ function applySharedSnapshot(data) {
   if (!state.settings.posMax) state.settings.posMax = { GK: 2, DF: 6, MF: 6, FW: 4 };
   save(); render();
   const cerKey = state.draft.order.join('-');
-  if (fresh && cerKey && localStorage.getItem('tl2627-ceremony-seen') !== cerKey) {
-    localStorage.setItem('tl2627-ceremony-seen', cerKey);
+  if (fresh && cerKey && localStorage.getItem(`${LS_NS}-ceremony-seen`) !== cerKey) {
+    localStorage.setItem(`${LS_NS}-ceremony-seen`, cerKey);
     showCeremony();
   }
 };
@@ -1421,7 +1425,7 @@ function anyMatchLive() { return state.fixtures.some(f => f.started && !f.finish
 /* ---- the Vidiprinter (ledger #8 — Tussie's Soccer-Saturday ticker) ----
    Every stats sync is diffed against the last; anything that happened
    comes off the tape, newest first. Kept per device, like a real telly. */
-const VIDI_KEY = 'tl2627-vidi';
+const VIDI_KEY = `${LS_NS}-vidi`;
 const VIDI_WORDS = { 10: 'TEN', 11: 'ELEVEN', 12: 'TWELVE', 13: 'THIRTEEN', 14: 'FOURTEEN', 15: 'FIFTEEN', 16: 'SIXTEEN' };
 let vidiFeed = [];
 try { vidiFeed = JSON.parse(localStorage.getItem(VIDI_KEY)) || []; } catch { vidiFeed = []; }
@@ -1604,6 +1608,13 @@ function render() {
     $('#demoExit').onclick = exitDemo;
   } else if (!demoMode && bar) {
     bar.remove();
+  }
+  if (SANDBOX && !$('#sandboxBar')) {
+    const sb = document.createElement('div');
+    sb.id = 'sandboxBar';
+    sb.className = 'demo-bar sandbox-bar';
+    sb.innerHTML = `<span class="rec"></span> SANDBOX — practice league for testing. The real league is untouched. <a class="btn small" href="${location.pathname}">Real site</a>`;
+    document.body.appendChild(sb);
   }
   const main = $('#main');
   if (state.phase === 'setup') { main.innerHTML = viewSetup(); bindSetup(); return; }
@@ -1869,7 +1880,7 @@ function bindSetup() {
     state.view = 'draft';
     publishAll();
     save(); render();
-    localStorage.setItem('tl2627-ceremony-seen', state.draft.order.join('-'));
+    localStorage.setItem(`${LS_NS}-ceremony-seen`, state.draft.order.join('-'));
     showCeremony();
   };
   $('#startDraft').onclick = () => startDraft(true);
@@ -4390,7 +4401,7 @@ function bindSettings() {
     if (netOn() && !isCommissioner()) { toast('Only the commissioner can reset the league'); return; }
     if (confirm('Wipe the league, draft and all scores — for EVERYONE?')) {
       state = freshState();
-      localStorage.removeItem('tl2627-ceremony-seen');
+      localStorage.removeItem(`${LS_NS}-ceremony-seen`);
       // rules only allow deleting a league that is back in setup — flip, then wipe
       if (netOn()) window.WCSync.set('phase', 'setup').then(() => window.WCSync.setRoot(null)).catch(e => console.warn('[sync] wipe failed', e));
       save(); render();

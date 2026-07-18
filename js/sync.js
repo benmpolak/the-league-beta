@@ -7,10 +7,13 @@ const app = initializeApp({
   databaseURL: 'https://calciopoli-wc26-default-rtdb.europe-west1.firebasedatabase.app',
 });
 const db = getDatabase(app);
-const LEAGUE = 'the-league-2627';
+// ?sandbox → separate practice league in Firebase; the real one is never touched
+const LEAGUE = new URLSearchParams(location.search).has('sandbox')
+  ? 'the-league-sandbox' : 'the-league-2627';
 const base = `leagues/${LEAGUE}`;
 
 window.WCSync = {
+  league: LEAGUE,
   set: (path, val) => set(ref(db, `${base}/${path}`), val),
   setRoot: val => set(ref(db, base), val),
   // atomic multi-key write: one snapshot, no partial states, unlisted keys kept
