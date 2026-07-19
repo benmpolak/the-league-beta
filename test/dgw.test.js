@@ -3,6 +3,7 @@
 // and that ordinary single-fixture players are unaffected.
 // Usage: python3 -m http.server 8125 (repo root) then node test/dgw.test.js
 const puppeteer = require('puppeteer-core');
+const chromePath = process.env.CHROME_BIN || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 let failures = 0;
 const check = (l, ok, d = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${l}${d ? ' — ' + d : ''}`); if (!ok) failures++; };
@@ -26,7 +27,7 @@ const SINGLE = { name: 'single-GW DF', pos: 'DF', expected: 6, stats: { min: 90,
 
 (async () => {
   const browser = await puppeteer.launch({
-    executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    executablePath: chromePath,
     headless: 'new',
   });
   const p = await browser.newPage();

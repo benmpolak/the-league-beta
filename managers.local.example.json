@@ -1,0 +1,17 @@
+{
+  "leagues": ["the-league-2627", "the-league-sandbox"],
+  "managers": [
+    { "managerId": 0, "email": "commissioner@example.com", "role": "commissioner" },
+    { "managerId": 1, "email": "manager1@example.com" },
+    { "managerId": 2, "email": "manager2@example.com" },
+    { "managerId": 3, "email": "manager3@example.com" },
+    { "managerId": 4, "email": "manager4@example.com" },
+    { "managerId": 5, "email": "manager5@example.com" },
+    { "managerId": 6, "email": "manager6@example.com" },
+    { "managerId": 7, "email": "manager7@example.com" },
+    { "managerId": 8, "email": "manager8@example.com" },
+    { "managerId": 9, "email": "manager9@example.com" },
+    { "managerId": 10, "email": "manager10@example.com" },
+    { "managerId": 11, "email": "manager11@example.com" }
+  ]
+}

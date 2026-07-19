@@ -1,10 +1,9 @@
 {
   "database": {
-    "rules": "database.rules.json"
+    "rules": "database.rules.v2.json"
   },
   "functions": {
-    "source": "functions",
-    "predeploy": ["node -e \"require('fs').copyFileSync('js/engine.js','functions/engine.js')\""]
+    "source": "functions"
   },
   "emulators": {
     "auth": { "port": 9099 },

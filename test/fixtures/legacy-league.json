@@ -1,0 +1,125 @@
+{
+  "phase": "season",
+  "managers": [
+    { "id": 1, "name": "Ben Polak", "team": "The Dog's Polaks" },
+    { "id": 2, "name": "Toby Levy", "team": "Chairman Mao" },
+    { "id": 3, "name": "Ben Levy", "team": "Atletico Benfield" }
+  ],
+  "settings": {
+    "squadSize": 14,
+    "posMin": { "GK": 1, "DF": 3, "MF": 3, "FW": 1 },
+    "posMax": { "GK": 2, "DF": 6, "MF": 6, "FW": 4 },
+    "pickTimer": 30,
+    "scoring": {
+      "appearance": 1,
+      "appearance60": 2,
+      "goalGK": 10,
+      "goalDF": 6,
+      "goalMF": 5,
+      "goalFW": 4,
+      "assist": 3,
+      "cleanSheet": 4,
+      "cleanSheetMF": 1,
+      "per3Saves": 1,
+      "penSave": 5,
+      "penMiss": -2,
+      "yellow": -1,
+      "red": -3,
+      "ownGoal": -2,
+      "per2Conceded": -1
+    }
+  },
+  "draft": {
+    "order": [2, 1, 3],
+    "picks": [
+      { "managerId": 2, "playerId": 201, "n": 1 },
+      { "managerId": 1, "playerId": 101, "n": 2 },
+      { "managerId": 3, "playerId": 301, "n": 3 },
+      { "managerId": 3, "playerId": 302, "n": 4 },
+      { "managerId": 1, "playerId": 102, "n": 5 },
+      { "managerId": 2, "playerId": 202, "n": 6 },
+      { "managerId": 2, "playerId": 203, "n": 7 },
+      { "managerId": 1, "playerId": 103, "n": 8 },
+      { "managerId": 3, "playerId": 303, "n": 9 }
+    ],
+    "breaksDone": [1],
+    "timewastes": { "2": 1 },
+    "paused": false,
+    "pausedLeft": 0
+  },
+  "lineups": {
+    "1": {
+      "0": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111],
+      "1": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 112]
+    },
+    "2": {
+      "0": [201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211]
+    },
+    "3": {
+      "0": [301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311],
+      "1": [301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 312]
+    }
+  },
+  "transfers": [
+    { "managerId": 1, "outId": 104, "inId": 150, "gw": 1, "n": 1, "t": 1756500000000 },
+    { "managerId": 2, "outId": 204, "inId": 250, "gw": 2, "n": 2, "t": 1757100000000, "waiver": true },
+    { "managerId": 3, "outId": 304, "inId": 103, "gw": 2, "n": 3, "t": 1757200000000, "trade": true }
+  ],
+  "trades": [
+    { "id": 1, "from": 3, "to": 1, "give": [304], "get": [103], "status": "done", "t": 1757200000000 },
+    { "id": 2, "from": 2, "to": 3, "give": [205], "get": [305], "terms": "plus a pint at the Ship", "status": "pending", "t": 1757400000000 }
+  ],
+  "covenants": [
+    { "id": 1, "from": 1, "to": 2, "text": "Toby holds first refusal on any keeper Ben drops before Christmas.", "t": 1756000000000, "gw": 0 }
+  ],
+  "claims": {
+    "2": {
+      "1": [{ "in": 410, "out": 105 }],
+      "2": [
+        { "in": 411, "out": 206 },
+        { "in": 412, "out": 207 }
+      ]
+    },
+    "3": {
+      "3": [{ "in": 413, "out": 306 }]
+    }
+  },
+  "waiverMeta": { "lastRun": "2026-09-02T09:00:00.000Z", "control": "auto" },
+  "autolists": {
+    "1": [420, 421, 422],
+    "2": [430],
+    "3": [440, 441]
+  },
+  "pins": {
+    "1": "5f2a8c1d9e0b4a6c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c",
+    "2": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+    "3": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d"
+  },
+  "adjustments": { "101": 2, "204": -1 },
+  "shirtNums": {
+    "1": { "101": 9, "102": 10 },
+    "3": { "301": 7 }
+  },
+  "draftPool": {
+    "at": 1755280800000,
+    "ids": {
+      "101": "ARS", "102": "LIV", "103": "MCI", "104": "EVE", "105": "CHE",
+      "201": "LIV", "202": "ARS", "203": "TOT", "204": "NEW", "205": "AVL",
+      "301": "MCI", "302": "MUN", "303": "BHA", "304": "WHU", "305": "CRY"
+    }
+  },
+  "windowDraft": {
+    "status": "done",
+    "order": [3, 2, 1],
+    "turn": 3,
+    "passes": 2,
+    "picks": [{ "managerId": 3, "playerId": 512 }]
+  },
+  "tradeBlock": { "2": [205] },
+  "benchOrders": {
+    "1": { "0": [112, 113, 114] },
+    "2": { "0": [212, 213, 214] }
+  },
+  "lobus": { "1": 101, "2": 201, "3": 301 },
+  "hamCup": null
+}

@@ -1,11 +1,25 @@
 // The Saturday-morning scramble: two managers sign DIFFERENT trough players in
 // the same instant. Whole-array writes mean last-write-wins — do both survive?
-const puppeteer = require('/Users/benpolak/the-league/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
+const chromePath = process.env.CHROME_BIN || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const fs = require('fs');
+const path = require('path');
 const { execFileSync } = require('child_process');
 const curl = a => execFileSync('curl', ['-s', ...a], { encoding: 'utf8' });
 const LEAGUE = 'the-league-e2e-test';
-const DB = 'https://calciopoli-wc26-default-rtdb.europe-west1.firebasedatabase.app';
+// Target selection: emulator (preferred) or an explicitly acknowledged live run.
+const EMULATOR_HOST = process.env.FIREBASE_DATABASE_EMULATOR_HOST;
+if (!EMULATOR_HOST && process.env.LIVE_DB_TESTS !== '1') {
+  console.error('Refusing to run against the live RTDB without acknowledgement.');
+  console.error('Set FIREBASE_DATABASE_EMULATOR_HOST=127.0.0.1:9000 (preferred) or LIVE_DB_TESTS=1.');
+  process.exit(2);
+}
+const NS = 'calciopoli-wc26-default-rtdb';
+const DB = EMULATOR_HOST ? `http://${EMULATOR_HOST}`
+  : 'https://calciopoli-wc26-default-rtdb.europe-west1.firebasedatabase.app';
+const dbUrl = p => EMULATOR_HOST ? `${DB}/${p}.json?ns=${NS}` : `${DB}/${p}.json`;
+const CURL_AUTH = EMULATOR_HOST ? ['-H', 'Authorization: Bearer owner'] : [];
+console.log(EMULATOR_HOST ? `[db] emulator at ${EMULATOR_HOST} (ns=${NS})` : '[db] LIVE Firebase RTDB (LIVE_DB_TESTS=1)');
 let failures = 0;
 const check = (l, ok, d = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${l}${d ? ' — ' + d : ''}`); if (!ok) failures++; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -15,8 +29,12 @@ async function newClient(browser, whoami) {
   const p = await ctx.newPage();
   p.on('dialog', d => d.accept());
   await p.setRequestInterception(true);
-  const syncSrc = fs.readFileSync('/Users/benpolak/the-league/js/sync.js', 'utf8')
-    .replace("const LEAGUE = 'the-league-2627';", `const LEAGUE = '${LEAGUE}';`);
+  let syncSrc = fs.readFileSync(path.join(__dirname, '..', 'js', 'sync.js'), 'utf8')
+    .replace(/'the-league-2627'/g, `'${LEAGUE}'`);
+  if (EMULATOR_HOST) {
+    syncSrc = syncSrc.replace(/databaseURL:\s*'[^']+'/, `databaseURL: 'http://${EMULATOR_HOST}?ns=${NS}'`);
+  }
+  if (syncSrc.includes('the-league-2627')) throw new Error('sync.js stub failed — refusing to touch the real league');
   p.on('request', req => req.url().includes('js/sync.js')
     ? req.respond({ contentType: 'application/javascript', body: syncSrc }) : req.continue());
   await p.evaluateOnNewDocument(id => { localStorage.clear(); localStorage.setItem('tl2627-whoami', String(id)); }, whoami);
@@ -26,10 +44,10 @@ async function newClient(browser, whoami) {
 }
 
 (async () => {
-  curl(['-X', 'PUT', '-d', '"setup"', `${DB}/leagues/${LEAGUE}/phase.json`]);
-  curl(['-X', 'DELETE', `${DB}/leagues/${LEAGUE}.json`]);
+  curl(['-X', 'PUT', '-d', '"setup"', dbUrl(`leagues/${LEAGUE}/phase`), ...CURL_AUTH]);
+  curl(['-X', 'DELETE', dbUrl(`leagues/${LEAGUE}`), ...CURL_AUTH]);
   const browser = await puppeteer.launch({
-    executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    executablePath: chromePath,
     headless: 'new', protocolTimeout: 240000,
     args: ['--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'],
   });
@@ -75,7 +93,7 @@ async function newClient(browser, whoami) {
   // 1. different players, same instant → both land
   const [b1, c1] = await Promise.all([sign(B, 2, 0), sign(C, 5, 1)]);
   await sleep(2000);
-  let cloudArr = Object.values(JSON.parse(curl([`${DB}/leagues/${LEAGUE}/transfers.json`])) || {});
+  let cloudArr = Object.values(JSON.parse(curl([dbUrl(`leagues/${LEAGUE}/transfers`), ...CURL_AUTH])) || {});
   check('simultaneous trough signings of DIFFERENT players both survive',
     b1.ok && c1.ok && cloudArr.some(t => t && t.inId === b1.inId) && cloudArr.some(t => t && t.inId === c1.inId),
     `cloud holds ${cloudArr.length} transfers`);
@@ -83,7 +101,7 @@ async function newClient(browser, whoami) {
   // 2. THE SAME player, same instant → exactly one winner, loser told no
   const [b2, c2] = await Promise.all([sign(B, 2, 5), sign(C, 5, 5)]);
   await sleep(2000);
-  cloudArr = Object.values(JSON.parse(curl([`${DB}/leagues/${LEAGUE}/transfers.json`])) || {});
+  cloudArr = Object.values(JSON.parse(curl([dbUrl(`leagues/${LEAGUE}/transfers`), ...CURL_AUTH])) || {});
   const winners = cloudArr.filter(t => t && t.inId === b2.inId).length;
   check('same-player scramble: exactly ONE winner, loser politely refused',
     winners === 1 && (b2.ok !== c2.ok),
@@ -99,13 +117,13 @@ async function newClient(browser, whoami) {
   }, from, to);
   await Promise.all([prop(B, 2, 1), prop(C, 5, 1)]);
   await sleep(2000);
-  const tradesCloud = Object.values(JSON.parse(curl([`${DB}/leagues/${LEAGUE}/trades.json`])) || {});
+  const tradesCloud = Object.values(JSON.parse(curl([dbUrl(`leagues/${LEAGUE}/trades`), ...CURL_AUTH])) || {});
   check('simultaneous trade proposals BOTH land',
     tradesCloud.filter(t => t && t.status === 'pending').length === 2, `cloud holds ${tradesCloud.length} trades`);
 
   await browser.close();
-  curl(['-X', 'PUT', '-d', '"setup"', `${DB}/leagues/${LEAGUE}/phase.json`]);
-  curl(['-X', 'DELETE', `${DB}/leagues/${LEAGUE}.json`]);
+  curl(['-X', 'PUT', '-d', '"setup"', dbUrl(`leagues/${LEAGUE}/phase`), ...CURL_AUTH]);
+  curl(['-X', 'DELETE', dbUrl(`leagues/${LEAGUE}`), ...CURL_AUTH]);
   console.log(failures ? '\nRACE CONFIRMED — writes are lossy' : '\nNO RACE — appends are safe');
   process.exit(failures ? 1 : 0);
 })();

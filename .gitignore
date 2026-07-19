@@ -3,5 +3,16 @@ data/squads_raw.json
 .DS_Store
 firebase-debug.log
 node_modules/
-package.json
-package-lock.json
+data/backups/*.json
+# auth hardening — never commit these
+managers.local.json
+service-account*.json
+functions/engine.js
+functions/node_modules/
+*.secret.json
+emulator-data/
+firebase-export-*
+database-debug.log
+firestore-debug.log
+pubsub-debug.log
+ui-debug.log

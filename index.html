@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com; connect-src 'self' https://*.firebaseio.com wss://*.firebaseio.com https://*.firebasedatabase.app wss://*.firebasedatabase.app https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://europe-west1-calciopoli-wc26.cloudfunctions.net http://127.0.0.1:* ws://127.0.0.1:*; img-src 'self' data: https://resources.premierleague.com https://fantasy.premierleague.com; frame-src https://www.youtube.com https://www.youtube-nocookie.com; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; form-action 'self'">
 <title>The League — 2026/27</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9917;</text></svg>">
 <link rel="manifest" href="manifest.json">
@@ -24,8 +26,8 @@
       <p class="brand-sub">Est. 2015 &middot; Twelve managers &middot; Vive la r&eacute;volution</p>
     </div>
   </div>
-  <nav id="nav" class="nav"></nav>
-  <div class="sync-area" id="syncArea"></div>
+  <nav id="nav" class="nav" aria-label="League navigation"></nav>
+  <div class="sync-area" id="syncArea" aria-label="League status"></div>
 </header>
 
 <main id="main"></main>
@@ -37,6 +39,7 @@
 <script src="js/data.js"></script>
 <script src="js/history25.js"></script>
 <script src="js/lore.js"></script>
+<script src="js/engine.js"></script>
 <script src="js/app.js"></script>
 <script type="module" src="js/sync.js"></script>
 </body>

@@ -2,13 +2,28 @@
 // REAL Firebase RTDB under a throwaway league key. Draft night, turn
 // enforcement, deadline autopick single-firing, contested waivers, trough
 // signings, trades, and cross-device gameweek scoring — end to end.
-const puppeteer = require('/Users/benpolak/the-league/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
+const path = require('path');
+const chromePath = process.env.CHROME_BIN || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 const curl = (args) => execFileSync('curl', ['-s', ...args], { encoding: 'utf8' });
 
 const LEAGUE = 'the-league-e2e-test';
-const DB = 'https://calciopoli-wc26-default-rtdb.europe-west1.firebasedatabase.app';
+// Target selection: emulator (preferred) or an explicitly acknowledged live run.
+const EMULATOR_HOST = process.env.FIREBASE_DATABASE_EMULATOR_HOST;
+if (!EMULATOR_HOST && process.env.LIVE_DB_TESTS !== '1') {
+  console.error('Refusing to run against the live RTDB without acknowledgement.');
+  console.error('Set FIREBASE_DATABASE_EMULATOR_HOST=127.0.0.1:9000 (preferred) or LIVE_DB_TESTS=1.');
+  process.exit(2);
+}
+const NS = 'calciopoli-wc26-default-rtdb';
+const DB = EMULATOR_HOST ? `http://${EMULATOR_HOST}`
+  : 'https://calciopoli-wc26-default-rtdb.europe-west1.firebasedatabase.app';
+// emulator REST needs the namespace query param and an admin bearer token
+const dbUrl = p => EMULATOR_HOST ? `${DB}/${p}.json?ns=${NS}` : `${DB}/${p}.json`;
+const CURL_AUTH = EMULATOR_HOST ? ['-H', 'Authorization: Bearer owner'] : [];
+console.log(EMULATOR_HOST ? `[db] emulator at ${EMULATOR_HOST} (ns=${NS})` : '[db] LIVE Firebase RTDB (LIVE_DB_TESTS=1)');
 const SITE = 'http://localhost:8140';
 let failures = 0;
 const check = (l, ok, d = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${l}${d ? ' — ' + d : ''}`); if (!ok) failures++; };
@@ -16,8 +31,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function wipeTestLeague() {
   // the rules only allow deleting a league whose phase is 'setup' — flip, then wipe
-  curl(['-X', 'PUT', '-d', '"setup"', `${DB}/leagues/${LEAGUE}/phase.json`]);
-  curl(['-X', 'DELETE', `${DB}/leagues/${LEAGUE}.json`]);
+  curl(['-X', 'PUT', '-d', '"setup"', dbUrl(`leagues/${LEAGUE}/phase`), ...CURL_AUTH]);
+  curl(['-X', 'DELETE', dbUrl(`leagues/${LEAGUE}`), ...CURL_AUTH]);
 }
 
 async function newClient(browser, whoami) {
@@ -27,8 +42,12 @@ async function newClient(browser, whoami) {
   p.on('console', m => { const t = m.text(); if (/failed|denied|permission|warn/i.test(t)) console.log(`[console mgr${whoami}]`, t.slice(0, 200)); });
   p.on('dialog', d => d.accept());
   await p.setRequestInterception(true);
-  const syncSrc = fs.readFileSync('/Users/benpolak/the-league/js/sync.js', 'utf8')
-    .replace("const LEAGUE = 'the-league-2627';", `const LEAGUE = '${LEAGUE}';`);
+  let syncSrc = fs.readFileSync(path.join(__dirname, '..', 'js', 'sync.js'), 'utf8')
+    .replace(/'the-league-2627'/g, `'${LEAGUE}'`);
+  if (EMULATOR_HOST) {
+    syncSrc = syncSrc.replace(/databaseURL:\s*'[^']+'/, `databaseURL: 'http://${EMULATOR_HOST}?ns=${NS}'`);
+  }
+  if (syncSrc.includes('the-league-2627')) throw new Error('sync.js stub failed — refusing to touch the real league');
   p.on('request', req => {
     if (req.url().includes('js/sync.js')) {
       return req.respond({ contentType: 'application/javascript', body: syncSrc });
@@ -47,7 +66,7 @@ async function newClient(browser, whoami) {
 (async () => {
   await wipeTestLeague();
   const browser = await puppeteer.launch({
-    executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    executablePath: chromePath,
     headless: 'new',
     protocolTimeout: 300000,
     args: ['--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'],
@@ -227,7 +246,7 @@ async function newClient(browser, whoami) {
   }, target);
   console.log('  [waiver-run]', JSON.stringify(wRun));
   await sleep(1500);
-  console.log('  [cloud transfers]', curl([`${DB}/leagues/${LEAGUE}/transfers.json`]).slice(0, 300));
+  console.log('  [cloud transfers]', curl([dbUrl(`leagues/${LEAGUE}/transfers`), ...CURL_AUTH]).slice(0, 300));
   console.log('  [A local transfers]', await A.evaluate(() => JSON.stringify(state.transfers).slice(0, 300)));
   console.log('  [B local transfers]', await B.evaluate(() => JSON.stringify(state.transfers).slice(0, 300)));
   const waiverResult = await A.evaluate(t => {
@@ -288,7 +307,7 @@ async function newClient(browser, whoami) {
   // ---------- RESET RITUAL + CLEANUP ----------
   await A.evaluate(() => window.WCSync.set('phase', 'setup').then(() => window.WCSync.setRoot(null)));
   await sleep(1500);
-  const gone = JSON.parse(curl([`${DB}/leagues/${LEAGUE}.json`]));
+  const gone = JSON.parse(curl([dbUrl(`leagues/${LEAGUE}`), ...CURL_AUTH]));
   check('reset ritual wipes the test league (rules permit via setup)', gone === null);
 
   await browser.close();

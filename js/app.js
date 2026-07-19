@@ -106,8 +106,12 @@ const investigationLine = (L, B) => {
 const GAMEWEEKS = GAMEWEEKS_RAW.map(g => ({ n: g.n, label: g.label, from: g.deadline, to: g.to, finished: g.finished }));
 const REGULAR_GWS = 33; // GW33 ends the regular season; GW34–36 are the playoffs
 const CUP_START = 7;    // the Monzo Cup begins GW8 (index 7)
+let demoGwOverride = null;
 const gwFrom = i => GAMEWEEKS[i].from;
 function currentGwIndex() {
+  // The demo fabricates GW1. Keeping the real calendar here made the demo open
+  // on GW38 with a blank pitch, which looked broken to a first-time visitor.
+  if (demoGwOverride != null) return demoGwOverride;
   const now = Date.now();
   for (let i = 0; i < GAMEWEEKS.length; i++) if (now < new Date(GAMEWEEKS[i].to).getTime()) return i;
   return GAMEWEEKS.length - 1;
@@ -143,13 +147,29 @@ let state = load() || freshState();
 /* ---------------- multiplayer (Firebase sync) ---------------- */
 const SYNC_OFF = new URLSearchParams(location.search).has('nosync');
 const WHO_KEY = `${LS_NS}-whoami`;
+const SPECT_KEY = `${LS_NS}-spectate`;
 let whoami = +localStorage.getItem(WHO_KEY) || null; // manager id, -1 = spectator
 let syncConnected = false;
 let demoMode = false;
 let demoBackup = null;
 const syncOn = () => !SYNC_OFF && !!window.WCSync;
 const netOn = () => syncOn() && !demoMode;
-const isCommissioner = () => whoami === state.managers[0]?.id;
+// online identity comes from the server (Firebase sign-in + membership), never
+// from localStorage — an old stored whoami grants nothing once auth is live
+let authUser = null;      // {uid, email} | null
+let membership = null;    // {managerId, role} | null
+let spectating = localStorage.getItem(SPECT_KEY) === '1';
+function syncIdentity() {
+  if (!netOn()) return;
+  whoami = membership ? membership.managerId : (spectating ? -1 : null);
+}
+const isCommissioner = () => netOn() ? membership?.role === 'commissioner' : whoami === state.managers[0]?.id;
+// the one write path when online: a server-side mutation. The authoritative
+// result comes back via the snapshot listener; errors surface as toasts.
+function serverAct(action, data = {}) {
+  return window.WCSync.call(action, data)
+    .catch(e => { toast(e.message || 'The Committee refused that one.'); throw e; });
+}
 const canActFor = mid => demoMode || !syncOn() || whoami === mid || isCommissioner();
 // use for actions: blocks other managers, and makes the commissioner explicitly
 // confirm before touching a team that isn't theirs (no more accidents)
@@ -161,7 +181,9 @@ function actGuard(mid, what = 'team') {
   return true;
 }
 
-const SHARED_KEYS = ['phase', 'managers', 'settings', 'draft', 'lineups', 'transfers', 'trades', 'covenants', 'claims', 'waiverMeta', 'autolists', 'pins', 'adjustments', 'shirtNums', 'draftPool', 'windowDraft', 'tradeBlock', 'benchOrders', 'lobus', 'hamCup'];
+// pins are gone — identity is real sign-in now. claims/autolists stay in local
+// state but arrive via the OWNER's private node online (blind to everyone else).
+const SHARED_KEYS = ['phase', 'managers', 'settings', 'draft', 'lineups', 'transfers', 'trades', 'covenants', 'claims', 'waiverMeta', 'autolists', 'adjustments', 'shirtNums', 'draftPool', 'windowDraft', 'tradeBlock', 'benchOrders', 'lobus', 'hamCup'];
 function sharedSnapshot() {
   const o = {};
   for (const k of SHARED_KEYS) o[k] = state[k];
@@ -171,27 +193,17 @@ function sharedSnapshot() {
 let cloudKnown = false;   // have we received the first snapshot (any value)?
 let cloudHasData = false; // does the cloud currently hold a real league?
 function pushShared(path, val) {
-  if (!netOn()) return;
-  // NEVER write before the server has told us what's out there. A device that
-  // was backgrounded for weeks could otherwise blast its stale state over a
-  // live 12-year league on the first tap. Drop the write; the imminent
-  // snapshot re-renders the true state and the user simply acts again.
-  if (!cloudKnown) return;
-  // cloud is genuinely empty (a real reset): only the Chairman may seed it, and
-  // he seeds the WHOLE state so no device ever mistakes a fragment for truth.
-  if (!cloudHasData) { if (isCommissioner()) publishAll(); return; }
-  window.WCSync.set(path, val).catch(e => console.warn('[sync] write failed', e));
+  // clients can no longer write the database — every converted call site goes
+  // through serverAct() when online. Reaching this while netOn is a bug.
+  if (netOn()) console.warn('[v2] dropped direct write', path);
 }
 function publishAll() {
   if (!netOn()) return;
-  cloudKnown = true; cloudHasData = true; // we're about to make the cloud hold a full league
-  // one atomic multi-key update: every device sees a single complete snapshot
-  // (sequential per-key writes let clients glimpse half a league), and keys an
-  // older build doesn't know about are left untouched rather than dropped
-  const o = {};
-  for (const k of SHARED_KEYS) o[k] = state[k] ?? null;
-  const w = window.WCSync.update ? window.WCSync.update(o) : window.WCSync.setRoot(o);
-  w.catch(e => console.warn('[sync] publish failed', e));
+  // full-state publish (empty-cloud restore / file import) is a commissioner
+  // mutation like any other — the server splits private data per owner
+  serverAct('importState', { state: sharedSnapshot() })
+    .then(() => toast('League state published.'))
+    .catch(() => {});
 }
 const toArr = x => Array.isArray(x) ? x : (x ? Object.values(x) : []);
 
@@ -206,14 +218,10 @@ function txnArray(key, fn) {
     if (out) { state[key] = out; save(); render(); }
     return Promise.resolve(!!out);
   }
-  return window.WCSync.txn(key, cur => fn(toArr(cur)) || undefined)
-    .then(res => {
-      if (!res.committed) return false;
-      state[key] = toArr(res.snapshot.val());
-      save(); render();
-      return true;
-    })
-    .catch(e => { console.warn('[sync] txn failed', key, e); return false; });
+  // online, array writes are server-side transactions inside the mutation
+  // functions — a call site still hitting this is unconverted
+  console.warn('[v2] dropped direct txn', key);
+  return Promise.resolve(false);
 }
 // ownership computed from an arbitrary transfers list — for in-transaction checks
 function ownedIdsGiven(transfers, gwIdx) {
@@ -294,7 +302,6 @@ function applySharedSnapshot(data) {
   data.transfers = toArr(data.transfers);
   data.trades = toArr(data.trades);
   data.covenants = toArr(data.covenants);
-  data.pins = data.pins || {};
   data.autolists = data.autolists || {};
   for (const mid of Object.keys(data.autolists)) data.autolists[mid] = toArr(data.autolists[mid]);
   data.lineups = data.lineups || {};
@@ -323,7 +330,12 @@ function applySharedSnapshot(data) {
   // rather than clinging to a stale local copy (that's how a cancelled Ham
   // Cup or cleared trade-block used to linger forever on other devices)
   const defaults = freshState();
-  for (const k of SHARED_KEYS) state[k] = data[k] !== undefined ? data[k] : defaults[k];
+  for (const k of SHARED_KEYS) {
+    // online, claims/autolists never travel in the public snapshot — they are
+    // per-owner private data fed by onPrivateSnapshot. Keep the local copy.
+    if (netOn() && (k === 'claims' || k === 'autolists')) continue;
+    state[k] = data[k] !== undefined ? data[k] : defaults[k];
+  }
   if (!state.settings.posMin) state.settings.posMin = { GK: 1, DF: 3, MF: 3, FW: 1 };
   if (!state.settings.posMax) state.settings.posMax = { GK: 2, DF: 6, MF: 6, FW: 4 };
   save(); render();
@@ -334,6 +346,35 @@ function applySharedSnapshot(data) {
   }
 };
 window.onSyncConnection = up => { syncConnected = up; renderSyncArea(); };
+
+/* ----- auth + private data (v2) ----- */
+let _pendingPrivate;
+function applyPrivateNode(node) {
+  const mid = membership?.managerId;
+  if (mid == null) return;
+  state.autolists = { ...state.autolists, [mid]: toArr(node?.autolist) };
+  const claims = {};
+  for (const [g, arr] of Object.entries(node?.claims || {})) claims[g] = { [mid]: toArr(arr) };
+  state.claims = claims;
+  save(); render();
+}
+window.onPrivateSnapshot = node => {
+  if (!netOn()) return;
+  if (!membership) { _pendingPrivate = node; return; } // membership may land second
+  applyPrivateNode(node);
+};
+window.onMembershipSnapshot = m => {
+  membership = m || null;
+  syncIdentity();
+  if (membership && _pendingPrivate !== undefined) { applyPrivateNode(_pendingPrivate); _pendingPrivate = undefined; }
+  render();
+};
+window.onAuthChanged = u => {
+  authUser = u;
+  if (!u) { membership = null; _pendingPrivate = undefined; }
+  syncIdentity();
+  render();
+};
 
 function freshState() {
   return {
@@ -361,7 +402,6 @@ function freshState() {
     },
     draft: { order: [], picks: [], breaksDone: [], timewastes: {}, paused: false, pausedLeft: 0 },
     autolists: {},         // managerId -> [pid] ranked personal autopick list / shortlist
-    pins: {},              // managerId -> salted SHA-256 of their PIN
     lineups: {},           // managerId -> { gwIndex: [pid x11] }
     shirtNums: {},         // managerId -> { pid: customNumber }
     transfers: [],         // [{managerId, outId, inId, gw, n, t, trade?, waiver?}]
@@ -480,7 +520,10 @@ async function enterDemo() {
   if (demoMode) return;
   demoBackup = state;
   demoMode = true;
+  demoGwOverride = 0;
   state = buildDemoState();
+  teamView.gw = 0;
+  fxView.gw = GAMEWEEKS[0]?.n || 1;
   // a live-looking Vidiprinter tape from real drafted names (memory only —
   // the device's real tape is stashed and restored on exit)
   const dsq = mid => state.draft.picks.filter(pk => pk.managerId === mid).map(pk => PLAYER_BY_ID[pk.playerId]);
@@ -517,6 +560,9 @@ async function enterDemo() {
 function exitDemo() {
   state = demoBackup || load() || freshState();
   demoMode = false;
+  demoGwOverride = null;
+  teamView.gw = null;
+  fxView.gw = null;
   demoBackup = null;
   if (vidiStash !== null) { vidiFeed = vidiStash; vidiStash = null; }
   // any league changes that landed while we were in the demo were swallowed —
@@ -531,7 +577,7 @@ function load() {
     if (s && !s.claims) s.claims = {};
     if (s && !s.autolists) s.autolists = {};
     if (s && !s.trades) s.trades = [];
-    if (s && !s.pins) s.pins = {};
+    if (s && s.pins) delete s.pins; // PINs retired — real sign-in now
     if (s && !s.covenants) s.covenants = [];
     if (s && !s.waiverMeta) s.waiverMeta = { lastRun: null, control: 'auto' };
     if (s && !s.shirtNums) s.shirtNums = {};
@@ -642,6 +688,8 @@ const statusChip = p => STATUS_ICON[p.status]
 const statusClass = p => p.status === 'a' ? '' : p.status === 'd' ? 'st-amber' : 'st-red';
 function toast(msg) {
   const el = $('#toast') || document.body.appendChild(Object.assign(document.createElement('div'), { id: 'toast' }));
+  el.setAttribute('role', 'status');
+  el.setAttribute('aria-live', 'polite');
   el.textContent = msg;
   el.classList.add('show');
   clearTimeout(toast._t);
@@ -799,11 +847,7 @@ function wdAdvance(passed, newPick = null) {
     if (state.windowDraft && (state.windowDraft.passes >= toArr(state.windowDraft.order).length || !lockedArrivals().length)) wdFinish();
   };
   if (!netOn()) { state.windowDraft = apply(state.windowDraft); after(); return; }
-  window.WCSync.txn('windowDraft', wd => apply(wd || undefined)).then(res => {
-    const wd = wdMutate(res.snapshot.val());
-    if (wd) state.windowDraft = wd;
-    after();
-  }).catch(e => console.warn('[wd]', e));
+  // online: the pick/pass mutation already advanced the turn server-side
 }
 function wdFinish() {
   if (state.windowDraft?.status === 'done') return;
@@ -816,18 +860,33 @@ function wdFinish() {
     toast('The window business is done — anyone left is loose in the Trough.');
   };
   if (!netOn()) { done(); return; }
-  window.WCSync.txn('windowDraft', wd => wd ? { ...wd, status: 'done' } : undefined).then(done).catch(e => console.warn('[wd]', e));
+  serverAct('windowDraft', { op: 'end' }).catch(() => {});
 }
 function myClaims(mid) { return toArr(state.claims?.[currentGwIndex()]?.[mid]); }
 function setClaims(mid, arr) {
   const cur = currentGwIndex();
+  if (netOn()) {
+    serverAct('claimSet', { gwIndex: cur, claims: arr }).catch(() => {});
+    // the private snapshot echoes the authoritative list back
+  }
   (state.claims[cur] = state.claims[cur] || {})[mid] = arr;
-  pushShared(`claims/${cur}/${mid}`, arr);
   save(); render();
 }
 // commissioner-only: resolve all pending claims, then open the Trough
 function processWaivers(manual = false) {
   if (netOn() && !isCommissioner()) { toast('Only the Chairman runs waivers'); return; }
+  if (netOn()) {
+    // online, the server resolves waivers (it can see everyone's blind claims;
+    // this device can only see its own)
+    serverAct('waiverRunNow', {}).then(res => {
+      const ex = toArr(res?.executed);
+      if (res?.skipped) { toast(`Waivers skipped — ${res.skipped}.`); return; }
+      toast(ex.length
+        ? `Waivers processed — ${ex.map(e => `${managerName(e.mid)} lands ${PLAYER_BY_ID[e.in]?.name}`).join(', ')}. The Trough is open.`
+        : 'Waivers processed — no claims landed. The Trough is open.');
+    }).catch(() => {});
+    return;
+  }
   // stamp the run at its START: players dropped DURING the run land after it,
   // so they go back on waivers until the next one — no instant snipes
   const runStart = Date.now() - 1;
@@ -888,16 +947,6 @@ function processWaivers(manual = false) {
       return;
     }
     for (const g of buckets) state.claims[g] = {};
-    // clear the swept buckets and stamp the run in ONE atomic snapshot
-    if (netOn() && window.WCSync.update) {
-      const upd = { waiverMeta: stampedMeta };
-      for (const g of buckets) upd[`claims/${g}`] = null;
-      window.WCSync.update(upd).catch(e => console.warn('[waivers] clear failed', e));
-    } else {
-      for (const g of buckets) pushShared(`claims/${g}`, null);
-      pushShared('waiverMeta', stampedMeta);
-    }
-    for (const mid of touchedLineups) pushShared(`lineups/${mid}/${tgw}`, state.lineups[mid][tgw]);
     save(); render();
     toast(executed.length
       ? `Waivers processed — ${executed.map(e => `${managerName(e.mid)} lands ${PLAYER_BY_ID[e.in]?.name}`).join(', ')}. The Trough is open.`
@@ -906,9 +955,8 @@ function processWaivers(manual = false) {
 }
 function setWaiverControl(mode) {
   if (netOn() && !isCommissioner()) { toast('Only the Chairman controls the Trough'); return; }
-  state.waiverMeta = { ...state.waiverMeta, control: mode };
-  pushShared('waiverMeta', state.waiverMeta);
-  save(); render();
+  if (netOn()) { serverAct('waiverControl', { mode }).catch(() => {}); }
+  else { state.waiverMeta = { ...state.waiverMeta, control: mode }; save(); render(); }
   toast(mode === 'open' ? 'The Trough is thrown open — everything is free to sign.'
     : mode === 'closed' ? 'The Trough is closed. The Chairman has spoken.'
     : 'Back on schedule — waivers Tue & Fri, 10:00 UTC.');
@@ -945,6 +993,11 @@ const tradeNames = ids => ids.map(id => PLAYER_BY_ID[id]?.name || '?').join(' + 
 function proposeTrade(from, to, give, get, terms = '') {
   give = toArr(give); get = toArr(get);
   if (!give.length || give.length !== get.length) { toast('Trades swap the same number of players each way'); return; }
+  if (netOn()) {
+    serverAct('tradePropose', { to, give, get, terms: terms.slice(0, 200), ...(from !== whoami && { asManager: from }) })
+      .then(() => toast(`Trade proposed to ${managerName(to)}. Their move.`)).catch(() => {});
+    return;
+  }
   const offer = { id: Date.now() + '-' + from, from, to, give, get, terms: terms.slice(0, 200), status: 'pending', t: Date.now() };
   txnArray('trades', arr => [...arr, offer])
     .then(ok => toast(ok ? `Trade proposed to ${managerName(to)}. Their move.` : 'Proposal didn’t send — check connection and try again'));
@@ -956,6 +1009,14 @@ const setTradeStatus = (id, status) =>
 function respondTrade(id, accept) {
   const tr = toArr(state.trades).find(x => x.id === id);
   if (!tr || tr.status !== 'pending') return;
+  if (netOn()) {
+    serverAct('tradeRespond', { tradeId: id, action: accept ? 'accept' : 'reject' })
+      .then(() => toast(accept
+        ? `Trade done: ${tradeNames(tGive(tr))} ↔ ${tradeNames(tGet(tr))}. Executed instantly, as is right and proper.`
+        : 'Trade rejected. Nothing personal. (It was personal.)'))
+      .catch(() => {});
+    return;
+  }
   if (!accept) {
     setTradeStatus(id, 'rejected')
       .then(() => toast('Trade rejected. Nothing personal. (It was personal.)'));
@@ -1052,17 +1113,11 @@ function makePick(playerId, force = false) {
     save(); render();
   };
   if (netOn()) {
-    const expected = pickNo();
-    window.WCSync.txn('draft/picks', cur => {
-      const arr = toArr(cur);
-      if (arr.length !== expected) return; // someone got there first — abort
-      arr.push(rec);
-      return arr;
-    }).then(res => {
-      if (!res.committed) { toast('Pick clashed — the board moved on'); return; }
-      state.draft.picks = toArr(res.snapshot.val());
-      finishPick(state.draft.picks.length);
-    }).catch(e => { console.warn(e); toast('Pick failed to send — check connection'); });
+    // the server enforces turn, legality and the pick race; deadline/phase
+    // advance server-side and come back in the snapshot
+    serverAct('draftPick', { playerId, expectedCount: pickNo() })
+      .then(r => { if (r.total >= totalPicks() && whoami === mid) state.view = 'dash'; })
+      .catch(() => {});
   } else {
     state.draft.picks.push(rec);
     finishPick(state.draft.picks.length);
@@ -1071,6 +1126,7 @@ function makePick(playerId, force = false) {
 function autoPick(force = false) {
   const mid = currentManagerId();
   if (mid == null) return;
+  if (netOn()) { serverAct('draftAutopick', {}).catch(() => {}); return; }
   const taken = draftedIds();
   // the manager's own autopick list first, then best available by rating
   let best = toArr(state.autolists?.[mid]).map(id => PLAYER_BY_ID[id])
@@ -1081,7 +1137,7 @@ function autoPick(force = false) {
 }
 function setAutolist(mid, arr) {
   state.autolists[mid] = arr;
-  pushShared(`autolists/${mid}`, arr);
+  if (netOn()) serverAct('autolistSet', { pids: arr }).catch(() => {});
   save(); render();
 }
 
@@ -1116,9 +1172,13 @@ function autoXI(squad) { return legalizeXI([], squad); }
 // times, and an edit after kick-off (a wound-back phone clock) shows in red
 function saveLineup(mid, gw, xi) {
   (state.lineups[mid] = state.lineups[mid] || {})[gw] = xi;
+  if (netOn()) {
+    // server stamps the -t with ITS clock (no wound-back phones) and re-checks
+    // ownership, shape and the deadline
+    serverAct('lineupSave', { gw, xi, ...(mid !== whoami && { asManager: mid }) }).catch(() => {});
+    return;
+  }
   state.lineups[mid][`${gw}-t`] = Date.now();
-  pushShared(`lineups/${mid}/${gw}`, xi);
-  pushShared(`lineups/${mid}/${gw}-t`, state.lineups[mid][`${gw}-t`]);
 }
 function lineupStamp(mid, gwIdx) {
   const ts = state.lineups?.[mid]?.[`${gwIdx}-t`];
@@ -1210,7 +1270,7 @@ function benchFor(mid, gwIdx) {
 function setBenchOrder(mid, gwIdx, pids) {
   (state.benchOrders = state.benchOrders || {})[mid] = state.benchOrders[mid] || {};
   state.benchOrders[mid][gwIdx] = pids;
-  pushShared(`benchOrders/${mid}/${gwIdx}`, pids);
+  if (netOn()) serverAct('benchOrder', { gw: gwIdx, pids, ...(mid !== whoami && { asManager: mid }) }).catch(() => {});
 }
 // auto-subs: starters who never played are replaced by bench players who did,
 // best-rated first, keeping the XI shape legal
@@ -1379,12 +1439,13 @@ function playoffOdds(runs = 1000) {
 const blockList = mid => toArr(state.tradeBlock?.[mid]);
 const onBlock = pid => state.managers.some(m => blockList(m.id).includes(pid));
 function toggleBlock(mid, pid) {
+  if (netOn()) {
+    serverAct('blockToggle', { pid, ...(mid !== whoami && { asManager: mid }) }).catch(() => {});
+    return;
+  }
   const list = blockList(mid);
   const next = list.includes(pid) ? list.filter(x => x !== pid) : [...list, pid];
   state.tradeBlock = { ...(state.tradeBlock || {}), [mid]: next };
-  // write ONLY this manager's list — writing the whole node would revert
-  // another manager who listed a player at the same moment
-  pushShared(`tradeBlock/${mid}`, next);
   save(); render();
 }
 
@@ -1584,6 +1645,8 @@ const NAV_ITEMS = [
   ['rules', 'Rules'],
   ['settings', 'Settings'],
 ];
+const SEASON_PRIMARY_NAV = new Set(['dash', 'team', 'transfers', 'table']);
+const DRAFT_NAV = new Set(['draft', 'rules', 'settings']);
 
 let lastRenderedView = null;
 function render() {
@@ -1644,33 +1707,11 @@ function render() {
   }
 }
 
-async function pinHash(mid, pin) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`tl2627:${mid}:${pin}`));
-  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
-}
-// claim an identity: verify the PIN if one is set, offer to set one if not
-async function claimIdentity(mid) {
-  if (mid !== -1 && state.pins?.[mid]) {
-    const pin = prompt(`PIN for ${managerName(mid)}:`);
-    if (pin == null) return false;
-    if (await pinHash(mid, pin.trim()) !== state.pins[mid]) { toast(`Wrong PIN. Forgotten it? Ask ${managerName(state.managers[0]?.id)} to reset it.`); return false; }
-  } else if (mid !== -1 && netOn()) {
-    // never set a PIN before the cloud has loaded — a pre-snapshot device has
-    // empty pins and would treat a returning manager as a first sign-in,
-    // overwriting their real PIN
-    if (!cloudKnown) { toast('Still loading the league — give it a second and tap your team again.'); return false; }
-    if (state.pins?.[mid]) return claimIdentity(mid); // PIN arrived while we waited — take the PIN path
-    // confirm WHO you are before setting a PIN — a mis-tap otherwise locks the
-    // real manager out of their own identity
-    const m = state.managers.find(x => x.id === mid);
-    if (!confirm(`You're claiming ${m.team} — ${m.name}. Is that you? (Wrong team? Cancel and pick again.)`)) return false;
-    const pin = prompt(`First sign-in for ${m.name} — set a PIN (4+ digits). You'll use it on any device.`);
-    if (!pin || pin.trim().length < 4) { toast('A PIN (4+ digits) is required to sign in.'); return false; }
-    (state.pins = state.pins || {})[mid] = await pinHash(mid, pin.trim());
-    pushShared(`pins/${mid}`, state.pins[mid]);
-    save();
-    toast('PIN set. Do not tell Tussie.');
-  }
+// claim an identity — OFFLINE/DEMO ONLY. Online, identity comes from real
+// sign-in (email link) and the server-owned membership map; nothing here can
+// grant it.
+function claimIdentity(mid) {
+  if (netOn() && mid !== -1) return false;
   whoami = mid;
   localStorage.setItem(WHO_KEY, whoami);
   render();
@@ -1679,41 +1720,96 @@ async function claimIdentity(mid) {
 }
 
 let forceIdentity = false; // set when an action needs a signed-in manager first
+let linkSentTo = null;     // email a sign-in link was just sent to
 function renderIdentity() {
   let ov = $('#whoOverlay');
   const needed = (netOn() && state.phase !== 'setup' && !whoami) || forceIdentity;
-  if (!needed) { ov?.remove(); return; }
+  if (!needed) { ov?.remove(); linkSentTo = null; return; }
   ov?.remove();
   ov = document.createElement('div');
   ov.id = 'whoOverlay';
   ov.className = 'overlay';
-  ov.innerHTML = `<div class="card" style="max-width:560px;width:94%">
-    <h2>Sign in</h2>
-    <p class="muted" style="font-size:13px;margin-bottom:14px">Pick your team. First sign-in sets your PIN (4+ digits); after that it's your key on any device. Forgotten PINs go to the Chairman.</p>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px;margin-bottom:10px">
-    ${state.managers.map((m, i) => `<button class="btn ghost" data-who="${m.id}" style="text-align:left;padding:10px 12px">
-      <b>${esc(m.team || m.name)}</b>${i === 0 ? ' <span class="tag">Chairman</span>' : ''}<br>
-      <span class="muted" style="font-size:11.5px">${esc(m.name)} ${state.pins?.[m.id] ? '&#128274;' : '<span style="color:var(--accent)">· first sign-in</span>'}</span>
-    </button>`).join('')}
-    </div>
-    <div style="display:flex;gap:8px">
-      <button class="btn ghost small" data-who="-1" style="flex:1;opacity:.75">&#128065; Just watching</button>
-      <button class="btn ghost small" id="whoDemo" style="flex:1;opacity:.75">&#127918; Show me a demo season</button>
-      ${forceIdentity ? '<button class="btn ghost small" id="whoCancel" style="opacity:.75">&#10005;</button>' : ''}
-    </div>
-  </div>`;
+  if (netOn() && authUser && !membership) {
+    // signed in with an email the league doesn't know
+    ov.innerHTML = `<div class="card" style="max-width:480px;width:94%">
+      <h2>Who let you in?</h2>
+      <p class="muted" style="font-size:13px;margin-bottom:14px">${esc(authUser.email || 'This email')} isn't on the Committee's list. If you're one of the twelve, talk to the Chairman.</p>
+      <div style="display:flex;gap:8px">
+        <button class="btn ghost small" id="whoSignOut" style="flex:1">Sign out</button>
+        <button class="btn ghost small" data-who="-1" style="flex:1;opacity:.75">&#128065; Just watching</button>
+      </div>
+    </div>`;
+  } else if (netOn()) {
+    ov.innerHTML = `<div class="card" style="max-width:480px;width:94%">
+      <h2>Sign in</h2>
+      ${linkSentTo
+        ? `<p style="font-size:14px;margin-bottom:14px">&#9993; Link sent to <b>${esc(linkSentTo)}</b>. Open the email ON THIS DEVICE and tap it — that's the whole sign-in.</p>
+           <button class="btn ghost small" id="whoResend">Different email</button>`
+        : `<p class="muted" style="font-size:13px;margin-bottom:14px">No passwords, no PINs. Enter the email the Chairman registered for you and we'll send a sign-in link.</p>
+           <form id="whoEmailForm" style="display:flex;gap:8px;margin-bottom:10px">
+             <input type="email" id="whoEmail" required placeholder="you@example.com" autocomplete="email" style="flex:1;min-width:0">
+             <button class="btn" type="submit">Send link</button>
+           </form>`}
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn ghost small" data-who="-1" style="flex:1;opacity:.75">&#128065; Just watching</button>
+        <button class="btn ghost small" id="whoDemo" style="flex:1;opacity:.75">&#127918; Show me a demo season</button>
+        ${forceIdentity ? '<button class="btn ghost small" id="whoCancel" style="opacity:.75">&#10005;</button>' : ''}
+      </div>
+    </div>`;
+  } else {
+    // offline / local play: the old pick-your-team grid, no PINs
+    ov.innerHTML = `<div class="card" style="max-width:560px;width:94%">
+      <h2>Who are you?</h2>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px;margin-bottom:10px">
+      ${state.managers.map((m, i) => `<button class="btn ghost" data-who="${m.id}" style="text-align:left;padding:10px 12px">
+        <b>${esc(m.team || m.name)}</b>${i === 0 ? ' <span class="tag">Chairman</span>' : ''}<br>
+        <span class="muted" style="font-size:11.5px">${esc(m.name)}</span>
+      </button>`).join('')}
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn ghost small" data-who="-1" style="flex:1;opacity:.75">&#128065; Just watching</button>
+        <button class="btn ghost small" id="whoDemo" style="flex:1;opacity:.75">&#127918; Show me a demo season</button>
+        ${forceIdentity ? '<button class="btn ghost small" id="whoCancel" style="opacity:.75">&#10005;</button>' : ''}
+      </div>
+    </div>`;
+  }
   document.body.appendChild(ov);
-  ov.querySelector('#whoDemo').onclick = () => { forceIdentity = false; ov.remove(); enterDemo(); };
+  const wd = ov.querySelector('#whoDemo');
+  if (wd) wd.onclick = () => { forceIdentity = false; ov.remove(); enterDemo(); };
   const wc = ov.querySelector('#whoCancel');
   if (wc) wc.onclick = () => { forceIdentity = false; ov.remove(); };
-  ov.querySelectorAll('[data-who]').forEach(b => b.onclick = async () => {
-    if (await claimIdentity(+b.dataset.who)) { forceIdentity = false; render(); }
+  const so = ov.querySelector('#whoSignOut');
+  if (so) so.onclick = () => window.WCSync.auth.signOut();
+  const rs = ov.querySelector('#whoResend');
+  if (rs) rs.onclick = () => { linkSentTo = null; renderIdentity(); };
+  const form = ov.querySelector('#whoEmailForm');
+  if (form) form.onsubmit = e => {
+    e.preventDefault();
+    const email = ov.querySelector('#whoEmail').value.trim();
+    if (!email) return;
+    window.WCSync.auth.sendLink(email)
+      .then(() => { linkSentTo = email; renderIdentity(); })
+      .catch(err => toast(err.message || 'Could not send the link — check the address.'));
+  };
+  ov.querySelectorAll('[data-who]').forEach(b => b.onclick = () => {
+    const mid = +b.dataset.who;
+    if (mid === -1 && netOn()) {
+      spectating = true;
+      localStorage.setItem(SPECT_KEY, '1');
+      syncIdentity();
+      forceIdentity = false;
+      render();
+      toast('Spectator mode.');
+      return;
+    }
+    if (claimIdentity(mid)) { forceIdentity = false; render(); }
   });
 }
 
 function renderNav() {
   const nav = $('#nav');
   if (state.phase === 'setup') { nav.innerHTML = ''; return; }
+  nav.classList.toggle('draft-nav', state.phase === 'draft');
   // attention dots — the app taps you on the shoulder when it needs you
   const dots = {};
   if (state.phase === 'season' && whoami && whoami !== -1) {
@@ -1725,11 +1821,20 @@ function renderNav() {
       if (crocked) dots.team = crocked;
     }
   }
-  nav.innerHTML = NAV_ITEMS.map(([id, label]) =>
-    `<button data-view="${id}" class="${state.view === id ? 'active' : ''}">${label}${dots[id] ? `<span class="nav-dot" title="Needs your attention">${dots[id]}</span>` : ''}</button>`).join('');
-  nav.querySelectorAll('button').forEach(b => b.onclick = () => { state.view = b.dataset.view; save(); render(); });
-  // phones: the nav is a swipeable strip — keep the active tab in view
-  if (nav.scrollWidth > nav.clientWidth) nav.querySelector('.active')?.scrollIntoView({ inline: 'center', block: 'nearest' });
+  const allowed = state.phase === 'draft' ? DRAFT_NAV : new Set(NAV_ITEMS.map(([id]) => id));
+  const available = NAV_ITEMS.filter(([id]) => allowed.has(id));
+  const primarySet = state.phase === 'draft' ? new Set(['draft']) : SEASON_PRIMARY_NAV;
+  const primary = available.filter(([id]) => primarySet.has(id));
+  const more = available.filter(([id]) => !primarySet.has(id));
+  const button = ([id, label]) =>
+    `<button type="button" data-view="${id}" class="${state.view === id ? 'active' : ''}"${state.view === id ? ' aria-current="page"' : ''}>${label}${dots[id] ? `<span class="nav-dot" title="Needs your attention" aria-label="${dots[id]} item${dots[id] === 1 ? '' : 's'} need attention">${dots[id]}</span>` : ''}</button>`;
+  const moreActive = more.some(([id]) => id === state.view);
+  nav.innerHTML = `${primary.map(button).join('')}
+    <details class="nav-more${moreActive ? ' active' : ''}">
+      <summary${moreActive ? ' aria-current="page"' : ''}>More</summary>
+      <div class="nav-more-menu">${more.map(button).join('')}</div>
+    </details>`;
+  nav.querySelectorAll('button[data-view]').forEach(b => b.onclick = () => { state.view = b.dataset.view; save(); render(); });
 }
 
 function renderSyncArea() {
@@ -1743,15 +1848,16 @@ function renderSyncArea() {
     if (ageH > 1.5) bits.push(`<span class="tag" style="background:#4a3a10;color:#ffd98a" title="The stats feed normally refreshes every 15 minutes on matchdays. Scores may be lagging.">&#9888; feed ${ageH < 2 ? '90m' : Math.round(ageH) + 'h'} stale</span>`);
   }
   if (syncOn()) {
-    bits.push(`<span class="conn ${syncConnected ? 'up' : ''}" title="${syncConnected ? 'Live sync: connected' : 'Live sync: reconnecting — changes will queue'}">&#9679;</span>`);
-    const who = whoami === -1 ? 'Spectating' : (whoami ? esc(managerName(whoami)) : 'Who are you?');
-    bits.push(`<button class="tag" id="whoBtn" style="cursor:pointer" title="Switch who this device acts as">${who}</button>`);
+    bits.push(`<span class="conn ${syncConnected ? 'up' : ''}" role="status" aria-label="${syncConnected ? 'Live sync connected' : 'Live sync reconnecting; changes will queue'}" title="${syncConnected ? 'Live sync: connected' : 'Live sync: reconnecting — changes will queue'}">&#9679;</span>`);
+    const who = whoami === -1 ? 'Spectating' : (whoami ? esc(managerName(whoami)) : 'Sign in');
+    const whoTitle = netOn() ? (authUser ? 'Signed in — tap to sign out' : 'Sign in') : 'Switch who this device acts as';
+    bits.push(`<button class="tag" id="whoBtn" style="cursor:pointer" title="${whoTitle}">${who}</button>`);
   }
   if (state.phase === 'season') {
     const last = state.lastSync ? new Date(state.lastSync).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : 'never';
-    bits.push(`<span title="Scores auto-refresh every ~15 min on matchdays">Updated ${last}</span><button id="syncBtn" class="btn small" title="Refresh scores now">&#128222; Tap the lines</button>`);
+    bits.push(`<span class="sync-updated" title="Scores auto-refresh every ~15 min on matchdays">Updated ${last}</span><button id="syncBtn" class="btn small" title="Refresh scores now">&#128222; Tap the lines</button>`);
   }
-  bits.push(`<button class="tag" id="muteBtn" style="cursor:pointer" title="Broadcast sound (Ian's mute button)">${soundOn() ? '&#128266;' : '&#128263;'}</button>`);
+  bits.push(`<button class="tag" id="muteBtn" style="cursor:pointer" aria-label="${soundOn() ? 'Mute' : 'Unmute'} broadcast sound" title="Broadcast sound (Ian's mute button)">${soundOn() ? '&#128266;' : '&#128263;'}</button>`);
   el.innerHTML = bits.join('');
   const mb = $('#muteBtn');
   if (mb) mb.onclick = () => {
@@ -1760,7 +1866,17 @@ function renderSyncArea() {
     toast(soundOn() ? 'Broadcast sound on. Sorry, Ian.' : 'Broadcast muted. Ian wins this one.');
   };
   const wb = $('#whoBtn');
-  if (wb) wb.onclick = () => { whoami = null; localStorage.removeItem(WHO_KEY); render(); };
+  if (wb) wb.onclick = () => {
+    if (netOn()) {
+      spectating = false;
+      localStorage.removeItem(SPECT_KEY);
+      if (authUser) {
+        if (confirm('Sign out of the league on this device?')) window.WCSync.auth.signOut();
+      } else { whoami = null; render(); }
+      return;
+    }
+    whoami = null; localStorage.removeItem(WHO_KEY); render();
+  };
   const sb = $('#syncBtn');
   if (sb) sb.onclick = () => syncNow(true);
 }
@@ -1808,15 +1924,15 @@ function viewSetup() {
         ${['GK', 'DF', 'MF', 'FW'].map(pos => `
           <div><label>${POS_LABEL[pos]} min–max</label>
           <div style="display:flex;gap:6px">
-            <input type="number" min="0" max="11" data-posmin="${pos}" value="${posMin[pos]}">
-            <input type="number" min="0" max="11" data-posmax="${pos}" value="${posMax[pos]}">
+            <input type="number" min="0" max="11" data-posmin="${pos}" aria-label="${POS_LABEL[pos]} minimum" value="${posMin[pos]}">
+            <input type="number" min="0" max="11" data-posmax="${pos}" aria-label="${POS_LABEL[pos]} maximum" value="${posMax[pos]}">
           </div></div>`).join('')}
       </div>
       <div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <label style="font-size:12px;color:var(--muted);font-weight:700">SQUAD SIZE</label>
-        <input type="number" min="11" max="20" id="squadSize" value="${state.settings.squadSize}" style="width:60px">
+        <input type="number" min="11" max="20" id="squadSize" aria-label="Squad size" value="${state.settings.squadSize}" style="width:60px">
         <label style="font-size:12px;color:var(--muted);font-weight:700;margin-left:10px">PICK TIMER</label>
-        <select id="pickTimer">
+        <select id="pickTimer" aria-label="Pick timer">
           ${[0, 20, 30, 45, 60].map(t => `<option value="${t}" ${state.settings.pickTimer === t ? 'selected' : ''}>${t ? t + 's — autopick at zero' : 'Off'}</option>`).join('')}
         </select>
       </div>
@@ -1857,7 +1973,7 @@ function bindSetup() {
   });
   const startDraft = randomise => {
     // only the Chairman pulls this trigger — sign in first if the device hasn't
-    if (netOn() && whoami !== state.managers[0].id) {
+    if (netOn() && !isCommissioner()) {
       toast('Only the Chairman starts the draft — sign in as him to prove it');
       forceIdentity = true;
       renderIdentity();
@@ -1870,15 +1986,24 @@ function bindSetup() {
     const minSum = posMin.GK + posMin.DF + posMin.MF + posMin.FW;
     const maxSum = posMax.GK + posMax.DF + posMax.MF + posMax.FW;
     if (minSum > state.settings.squadSize || maxSum < state.settings.squadSize) { toast('Position min/max can’t make a legal squad'); return; }
-    state.draft.order = randomise
+    const order = randomise
       ? state.managers.map(m => m.id).sort(() => Math.random() - 0.5)
       : state.managers.map(m => m.id);
+    if (netOn()) {
+      // seed the setup state first (managers/settings edited on this screen),
+      // then the server flips the phase, stamps the pool and sets the clock
+      serverAct('importState', { state: { ...sharedSnapshot(), draft: { ...state.draft, order } } })
+        .then(() => serverAct('draftAdmin', { op: 'start', order }))
+        .then(() => { localStorage.setItem(`${LS_NS}-ceremony-seen`, order.join('-')); showCeremony(); })
+        .catch(() => {});
+      return;
+    }
+    state.draft.order = order;
     if (state.settings.pickTimer) state.draft.deadline = Date.now() + 5 * 60 * 1000;
     // draft-night snapshot: anyone who joins a PL club after this is locked until the window shuts
     state.draftPool = { at: Date.now(), ids: Object.fromEntries(PLAYERS.map(p => [p.id, p.club])) };
     state.phase = 'draft';
     state.view = 'draft';
-    publishAll();
     save(); render();
     localStorage.setItem(`${LS_NS}-ceremony-seen`, state.draft.order.join('-'));
     showCeremony();
@@ -2011,14 +2136,9 @@ function maybeDrinksBreak() {
     <button class="btn" id="breakDone" style="margin-top:16px">Back to the Console</button></div>`;
   document.body.appendChild(el);
   $('#breakDone').onclick = () => {
-    // deadline first, then the break flag — same-client writes are ordered, so no
-    // device ever sees the break end while an expired clock is still in force
-    if (state.settings.pickTimer) {
-      state.draft.deadline = Date.now() + state.settings.pickTimer * 1000;
-      pushShared('draft/deadline', state.draft.deadline);
-    }
+    if (netOn()) { serverAct('draftAdmin', { op: 'breakDone', round: n }).catch(() => {}); return; }
+    if (state.settings.pickTimer) state.draft.deadline = Date.now() + state.settings.pickTimer * 1000;
     state.draft.breaksDone = [...(state.draft.breaksDone || []), n];
-    pushShared('draft/breaksDone', state.draft.breaksDone);
     save(); render();
   };
 }
@@ -2446,6 +2566,10 @@ function poolTable() {
 
 let clockTimer = null;
 let firedDeadline = 0;
+function draftDeadlineTiming(deadline, now = Date.now()) {
+  const rawLeft = Math.round(((deadline || 0) - now) / 1000);
+  return { rawLeft, left: Math.max(0, rawLeft), overBy: Math.max(0, -rawLeft) };
+}
 function bindDraft() {
   clearInterval(clockTimer);
   if (state.phase === 'season') return;
@@ -2464,10 +2588,14 @@ function bindDraft() {
       tw.disabled = used >= 2 || !canActFor(mid);
       tw.onclick = () => {
         if ((state.draft.timewastes?.[mid] || 0) >= 2) { toast('No timewastes left — play on'); return; }
+        if (netOn()) {
+          serverAct('draftAdmin', { op: 'timewaste' })
+            .then(() => toast(`${managerName(mid)} is timewasting. Taking it to the corner flag.`))
+            .catch(() => {});
+          return;
+        }
         (state.draft.timewastes = state.draft.timewastes || {})[mid] = (state.draft.timewastes[mid] || 0) + 1;
         state.draft.deadline = (state.draft.deadline || Date.now()) + 60 * 1000;
-        pushShared('draft/timewastes', state.draft.timewastes);
-        pushShared('draft/deadline', state.draft.deadline);
         save(); render();
         toast(`${managerName(mid)} is timewasting. Taking it to the corner flag.`);
       };
@@ -2480,7 +2608,7 @@ function bindDraft() {
       const breakDue = drinksBreakAt(bn) && !(state.draft.breaksDone || []).includes(bn);
       if (state.draft.paused) { el.textContent = 'PAUSED'; el.classList.remove('urgent'); if (el2) el2.textContent = 'PAUSED'; return; }
       if (breakDue || $('#drinksBreak') || $('#ceremony')) return; // clock politely waits for pomp
-      const left = Math.max(0, Math.round(((state.draft.deadline || 0) - Date.now()) / 1000));
+      const { left, overBy } = draftDeadlineTiming(state.draft.deadline);
       el.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
       el.classList.toggle('urgent', left <= 10);
       if (el2) { el2.textContent = el.textContent; el2.classList.toggle('urgent', left <= 10); }
@@ -2489,7 +2617,6 @@ function bindDraft() {
         // on-clock manager's OWN device fires after an 8s grace. The pick
         // transaction is idempotent, so a double-fire is harmless — this just
         // guarantees the draft never stalls on one sleeping screen.
-        const overBy = -left; // seconds past the deadline
         const iAmCommish = !netOn() || isCommissioner();
         const iAmOnClock = netOn() && currentManagerId() === whoami;
         const mayFire = (overBy >= 0 && iAmCommish) || (overBy >= 8 && iAmOnClock);
@@ -2504,17 +2631,19 @@ function bindDraft() {
   const pb = $('#pauseDraft');
   if (pb) pb.onclick = () => {
     if (netOn() && !isCommissioner()) { toast('Only the commissioner pauses the draft'); return; }
+    if (netOn()) {
+      serverAct('draftAdmin', { op: state.draft.paused ? 'resume' : 'pause' })
+        .then(() => toast(state.draft.paused ? 'Draft resumed. The clock is live.' : 'Draft paused by the commissioner.'))
+        .catch(() => {});
+      return;
+    }
     if (state.draft.paused) {
       state.draft.paused = false;
       if (state.settings.pickTimer) state.draft.deadline = Date.now() + (state.draft.pausedLeft || state.settings.pickTimer * 1000);
-      pushShared('draft/paused', false);
-      pushShared('draft/deadline', state.draft.deadline);
       toast('Draft resumed. The clock is live.');
     } else {
       state.draft.paused = true;
       state.draft.pausedLeft = Math.max(5000, (state.draft.deadline || Date.now()) - Date.now());
-      pushShared('draft/paused', true);
-      pushShared('draft/pausedLeft', state.draft.pausedLeft);
       toast('Draft paused by the commissioner.');
     }
     save(); render();
@@ -2526,18 +2655,10 @@ function bindDraft() {
   bindPoolTable();
   $('#undoPick').onclick = () => {
     if (netOn() && !isCommissioner()) { toast('Only the commissioner can undo a pick'); return; }
-    const resetClock = () => {
-      if (state.settings.pickTimer) {
-        state.draft.deadline = Date.now() + state.settings.pickTimer * 1000;
-        pushShared('draft/deadline', state.draft.deadline);
-      }
-    };
-    if (netOn()) {
-      window.WCSync.txn('draft/picks', cur => { const a = toArr(cur); a.pop(); return a; })
-        .then(res => { state.draft.picks = toArr(res.snapshot.val()); resetClock(); save(); render(); });
-    } else {
-      state.draft.picks.pop(); resetClock(); save(); render();
-    }
+    if (netOn()) { serverAct('draftAdmin', { op: 'undo' }).catch(() => {}); return; }
+    state.draft.picks.pop();
+    if (state.settings.pickTimer) state.draft.deadline = Date.now() + state.settings.pickTimer * 1000;
+    save(); render();
   };
   const apBtn = $('#autoPick');
   if (apBtn) apBtn.onclick = () => {
@@ -2630,8 +2751,8 @@ function viewTeam() {
   return `
   ${notMine ? `<div class="card" style="margin-bottom:12px;border-color:var(--accent)"><p style="font-size:13px">&#128065;&#65039; You're looking at <b>${esc(teamName(mid))}</b> — ${esc(managerName(mid))}'s team${isCommissioner() ? '. Commissioner changes require confirmation.' : '. Look, don\'t touch.'} <button class="btn small" id="backToMine" style="margin-left:8px">Back to my team</button></p></div>` : ''}
   <div class="team-controls card">
-    <select id="teamMgr">${state.managers.map(m => `<option value="${m.id}" ${m.id === mid ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
-    <select id="teamGw">${GAMEWEEKS.map((g, i) => `<option value="${i}" ${i === gw ? 'selected' : ''}>GW${g.n} — ${g.label}${i === cur ? ' (current)' : ''}</option>`).join('')}</select>
+    <select id="teamMgr" aria-label="Manager">${state.managers.map(m => `<option value="${m.id}" ${m.id === mid ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
+    <select id="teamGw" aria-label="Gameweek">${GAMEWEEKS.map((g, i) => `<option value="${i}" ${i === gw ? 'selected' : ''}>GW${g.n} — ${g.label}${i === cur ? ' (current)' : ''}</option>`).join('')}</select>
     <span class="tag">${locked ? (gwIsOver(gw) ? 'Gameweek finished — locked' : 'Deadline passed — locked') : `Lineup open — locks ${new Date(gwFrom(gw)).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`}</span>
     <span class="tag">GW points: <b class="gold">&nbsp;${gwManagerPoints(mid, gw)}</b></span>
     <span class="tag" style="font-weight:400">${lineupStamp(mid, gw)}</span>
@@ -2779,11 +2900,13 @@ function bindTeam() {
     if (!actGuard(mid, 'stadium')) return;
     const v = prompt(`Name ${teamName(mid)}'s stadium:`, stadium(mid));
     if (v == null || !v.trim()) return;
+    if (netOn()) {
+      serverAct('stadiumSet', { name: v.trim().slice(0, 40), ...(mid !== whoami && { asManager: mid }) })
+        .then(() => toast(`${v.trim()} — naming rights sold for nothing.`)).catch(() => {});
+      return;
+    }
     const idx = state.managers.findIndex(m => m.id === mid);
     state.managers[idx].stadium = v.trim().slice(0, 40);
-    // write only this manager's stadium — never the whole 12-manager array,
-    // which would revert anyone else's just-changed name/team/stadium
-    pushShared(`managers/${idx}/stadium`, state.managers[idx].stadium);
     save(); render();
     toast(`${v.trim()} — naming rights sold for nothing.`);
   };
@@ -2862,8 +2985,12 @@ function bindTeam() {
     if (!n || n < 1 || n > 99) { toast('Numbers 1–99 only'); return; }
     const clash = squadAt(mid, cur2).find(x => x.id !== pid && +shirtNum(mid, x.id) === n);
     if (clash) { toast(`${n} is taken by ${clash.name}`); return; }
+    if (netOn()) {
+      serverAct('shirtNumSet', { pid, num: n, ...(mid !== whoami && { asManager: mid }) })
+        .then(() => toast(`${PLAYER_BY_ID[pid].name} takes the number ${n} shirt`)).catch(() => {});
+      return;
+    }
     (state.shirtNums[mid] = state.shirtNums[mid] || {})[pid] = n;
-    pushShared(`shirtNums/${mid}`, state.shirtNums[mid]);
     save(); render();
     toast(`${PLAYER_BY_ID[pid].name} takes the number ${n} shirt`);
   });  const gt = $('#goTransfers');
@@ -3032,6 +3159,11 @@ function bindTransfers() {
     if (!actGuard(mid, 'covenant')) return;
     const to = +$('#covWith').value, text = $('#covText').value.trim();
     if (!to || !text) { toast('Pick a counterparty and state the nonsense'); return; }
+    if (netOn()) {
+      serverAct('covenantAdd', { to, text: text.slice(0, 200), gw: GAMEWEEKS[cur].n, ...(mid !== whoami && { asManager: mid }) })
+        .then(() => toast('Recorded. It is now canon.')).catch(() => {});
+      return;
+    }
     const covenant = { id: Date.now() + '-' + mid, from: mid, to, text: text.slice(0, 200), t: Date.now(), gw: GAMEWEEKS[cur].n };
     txnArray('covenants', arr => [...arr, covenant])
       .then(ok => toast(ok ? 'Recorded. It is now canon.' : 'Didn’t record — check connection and try again'));
@@ -3042,8 +3174,8 @@ function bindTransfers() {
     const ord = [...state.draft.order].reverse();
     if (!ord.length) { toast('No draft order on record'); return; }
     if (!confirm(`Start the Window Draft? Order snakes backwards from draft night: ${ord.map(managerName).join(' › ')}. It runs until a full lap of passes.`)) return;
+    if (netOn()) { serverAct('windowDraft', { op: 'start' }).catch(() => {}); return; }
     state.windowDraft = { status: 'live', order: ord, turn: 0, passes: 0, picks: [] };
-    pushShared('windowDraft', state.windowDraft);
     save(); render();
   };
   const wdr = $('#wdRelease');
@@ -3051,7 +3183,16 @@ function bindTransfers() {
   const wde = $('#wdEnd');
   if (wde) wde.onclick = () => { if (confirm('End the Window Draft? Remaining arrivals go to the Trough.')) wdFinish(); };
   const wdp = $('#wdPass');
-  if (wdp) wdp.onclick = () => { if (!actGuard(wdActor(), 'window draft')) return; toast(`${managerName(wdActor())} passes.`); wdAdvance(true); };
+  if (wdp) wdp.onclick = () => {
+    if (!actGuard(wdActor(), 'window draft')) return;
+    if (netOn()) {
+      serverAct('windowDraft', { op: 'pass' })
+        .then(() => toast(`${managerName(wdActor())} passes.`)).catch(() => {});
+      return;
+    }
+    toast(`${managerName(wdActor())} passes.`);
+    wdAdvance(true);
+  };
   document.querySelectorAll('[data-wdin]').forEach(b => b.onclick = () => {
     const actor = wdActor();
     if (!actGuard(actor, 'window draft')) return;
@@ -3060,6 +3201,12 @@ function bindTransfers() {
     const inP = PLAYER_BY_ID[+b.dataset.wdin];
     const tgw = transferGw();
     if (!squadShapeOk([...squadAt(actor, tgw).filter(x => x.id !== outId), inP])) { toast('Breaks the squad position limits'); return; }
+    if (netOn()) {
+      serverAct('windowDraft', { op: 'pick', inId: inP.id, outId })
+        .then(() => toast(`${inP.name} signed in the Window Draft. ${PLAYER_BY_ID[outId]?.name} makes way.`))
+        .catch(() => {});
+      return;
+    }
     txnArray('transfers', arr => {
       const owned = ownedIdsGiven(arr, tgw);
       if (owned.has(inP.id) || !owned.has(outId)) return null;
@@ -3180,6 +3327,15 @@ function bindTransfers() {
         }
         const tgw = transferGw();
         if (!squadShapeOk([...squadAt(mid, tgw).filter(x => x.id !== outId), inP])) { toast('Breaks the squad position limits'); return; }
+        if (netOn()) {
+          // first come, first served — settled by a server transaction
+          serverAct('troughSign', { inId, outId, ...(mid !== whoami && { asManager: mid }) })
+            .then(r => {
+              transfersView.out = null;
+              toast(`${inP.name} signed from the Trough${r.tgw !== cur ? ` — in for GW${GAMEWEEKS[r.tgw].n}` : ''}. First come, first served.`);
+            }).catch(() => {});
+          return;
+        }
         // first come, first served — settled by a transaction, not by luck
         txnArray('transfers', arr => {
           const owned = ownedIdsGiven(arr, tgw);
@@ -3223,6 +3379,11 @@ function bindTransfers() {
     const tr = toArr(state.trades).find(x => x.id === b.dataset.trwd);
     if (!tr) return;
     if (!actGuard(tr.from, 'trade')) return;
+    if (netOn()) {
+      serverAct('tradeRespond', { tradeId: tr.id, action: 'withdraw' })
+        .then(() => toast('Offer withdrawn. Never happened.')).catch(() => {});
+      return;
+    }
     setTradeStatus(tr.id, 'withdrawn')
       .then(ok => toast(ok ? 'Offer withdrawn. Never happened.' : 'Too late — the offer already moved.'));
   });
@@ -4016,8 +4177,13 @@ function bindCup() {
     const cur = currentGwIndex();
     const from = Math.min(cur + 2, REGULAR_GWS - 1);
     const gw = from + Math.floor(Math.random() * Math.max(1, REGULAR_GWS - from));
+    if (netOn()) {
+      serverAct('hamAdmin', { op: 'draw', gw })
+        .then(() => { playSound('cheer'); toast(`THE HAM CUP IS DRAWN — GW${GAMEWEEKS[gw].n}. Palwin corks are popping.`); })
+        .catch(() => {});
+      return;
+    }
     state.hamCup = { gw, drawnAt: new Date().toISOString(), entries: {} };
-    pushShared('hamCup', state.hamCup);
     save(); render();
     playSound('cheer');
     toast(`THE HAM CUP IS DRAWN — GW${GAMEWEEKS[gw].n}. Palwin corks are popping.`);
@@ -4026,11 +4192,16 @@ function bindCup() {
   if (cancel) cancel.onclick = () => {
     if (netOn() && !isCommissioner()) { toast('Only the Chairman calls it off'); return; }
     if (!confirm('Call off the Ham Cup — for EVERYONE?')) return;
+    if (netOn()) {
+      serverAct('hamAdmin', { op: 'cancel' })
+        .then(() => toast('The Ham Cup is off. Palwin has withdrawn its sponsorship in disgust.'))
+        .catch(() => {});
+      return;
+    }
     // a tombstone, not a deletion: deleting the node would be invisible to
     // other devices (an absent key reads as "never drawn"), so a lingering
     // entry could resurrect a gw-less cup and crash the view
     state.hamCup = { status: 'off' };
-    pushShared('hamCup', state.hamCup);
     save(); render();
     toast('The Ham Cup is off. Palwin has withdrawn its sponsorship in disgust.');
   };
@@ -4049,9 +4220,14 @@ function bindCup() {
     if (!state.hamCup || state.hamCup.status === 'off' || GAMEWEEKS[state.hamCup.gw] === undefined) { toast('No Ham Cup is running.'); render(); return; }
     const sel = hamView.sel ?? toArr(state.hamCup?.entries?.[whoami] || []);
     if (!xiValid(sel)) { toast('That XI is illegal, even for the Ham Cup'); return; }
+    if (netOn()) {
+      serverAct('hamEnter', { xi: sel })
+        .then(() => { hamView.sel = null; toast('Ham XI entered. May God have mercy.'); })
+        .catch(() => {});
+      return;
+    }
     state.hamCup.entries = state.hamCup.entries || {};
     state.hamCup.entries[whoami] = sel;
-    pushShared(`hamCup/entries/${whoami}`, sel);
     hamView.sel = null;
     save(); render();
     toast('Ham XI entered. May God have mercy.');
@@ -4321,15 +4497,8 @@ function viewSettings() {
         <button class="btn danger" id="resetBtn">Reset everything</button>
       </div>
       <p class="muted" style="font-size:12px;margin-top:10px">Backups only — the league syncs live on its own, no files to pass around. Export drops a snapshot to your device; import restores one if it all goes wrong.</p>
-      <h3 style="margin-top:18px">PIN resets</h3>
-      <p class="muted" style="font-size:12px;margin-bottom:8px">Forgotten PINs go to the Chairman. Reset lets the manager set a new one on next sign-in.</p>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <select id="pinMgr" style="flex:1;min-width:160px">
-          <option value="">Pick a manager…</option>
-          ${state.managers.filter(m => state.pins?.[m.id]).map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}
-        </select>
-        <button class="btn small" id="pinReset">Reset PIN</button>
-      </div>
+      <h3 style="margin-top:18px">Sign-in</h3>
+      <p class="muted" style="font-size:12px;margin-bottom:8px">Managers sign in with an email link — no PINs, nothing to reset. Adding or changing a manager's email is done with the provisioning script (see the README).</p>
       <h3 style="margin-top:18px">Manual point adjustments</h3>
       <p class="muted" style="font-size:12px;margin-bottom:8px">If a stat feed gets something wrong, add/subtract points per player.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -4360,16 +4529,26 @@ function viewSettings() {
 function bindSettings() {
   document.querySelectorAll('[data-score]').forEach(inp => inp.onchange = () => {
     if (netOn() && !isCommissioner()) { toast('Only the commissioner changes scoring'); render(); return; }
+    if (netOn()) {
+      serverAct('settingsSet', { scoringKey: inp.dataset.score, value: +inp.value || 0 })
+        .then(() => toast('Scoring updated')).catch(() => {});
+      return;
+    }
     state.settings.scoring[inp.dataset.score] = +inp.value || 0;
-    pushShared(`settings/scoring/${inp.dataset.score}`, state.settings.scoring[inp.dataset.score]);
     save(); toast('Scoring updated');
   });
   const lb = $('#lobusBonus');
   if (lb) lb.onchange = () => {
     if (netOn() && !isCommissioner()) { toast('Only the commissioner changes scoring'); render(); return; }
-    state.settings.lobusBonus = +lb.value || 0;
-    pushShared('settings/lobusBonus', state.settings.lobusBonus);
-    save(); toast(state.settings.lobusBonus ? `Lobus bonus live: +${state.settings.lobusBonus}. Marc will be told.` : 'Lobus bonus off. The klaxon stays ceremonial.');
+    const v = +lb.value || 0;
+    if (netOn()) {
+      serverAct('settingsSet', { key: 'lobusBonus', value: v })
+        .then(() => toast(v ? `Lobus bonus live: +${v}. Marc will be told.` : 'Lobus bonus off. The klaxon stays ceremonial.'))
+        .catch(() => {});
+      return;
+    }
+    state.settings.lobusBonus = v;
+    save(); toast(v ? `Lobus bonus live: +${v}. Marc will be told.` : 'Lobus bonus off. The klaxon stays ceremonial.');
   };
   const demoB = $('#demoBtn2'); if (demoB) demoB.onclick = enterDemo;
   const exportB = $('#exportBtn');
@@ -4400,29 +4579,22 @@ function bindSettings() {
   $('#resetBtn').onclick = () => {
     if (netOn() && !isCommissioner()) { toast('Only the commissioner can reset the league'); return; }
     if (confirm('Wipe the league, draft and all scores — for EVERYONE?')) {
+      if (netOn()) { serverAct('resetLeague', { confirm: 'RESET' }).catch(() => {}); return; }
       state = freshState();
       localStorage.removeItem(`${LS_NS}-ceremony-seen`);
-      // rules only allow deleting a league that is back in setup — flip, then wipe
-      if (netOn()) window.WCSync.set('phase', 'setup').then(() => window.WCSync.setRoot(null)).catch(e => console.warn('[sync] wipe failed', e));
       save(); render();
     }
-  };
-  const pr = $('#pinReset');
-  if (pr) pr.onclick = () => {
-    if (netOn() && !isCommissioner()) { toast('Only the Chairman resets PINs'); return; }
-    const mid2 = +$('#pinMgr').value;
-    if (!mid2) return;
-    delete state.pins[mid2];
-    pushShared(`pins/${mid2}`, null);
-    save(); render();
-    toast(`${managerName(mid2)}'s PIN cleared — they'll set a new one on next sign-in`);
   };
   $('#adjApply').onclick = () => {
     if (netOn() && !isCommissioner()) { toast('Only the commissioner adjusts points'); return; }
     const pid = +$('#adjPlayer').value, pts = +$('#adjPts').value || 0;
     if (!pid) return;
+    if (netOn()) {
+      serverAct('adjustmentSet', { pid, value: (state.adjustments[pid] || 0) + pts })
+        .then(() => toast('Adjustment applied')).catch(() => {});
+      return;
+    }
     state.adjustments[pid] = (state.adjustments[pid] || 0) + pts;
-    pushShared(`adjustments/${pid}`, state.adjustments[pid]);
     save(); render(); toast('Adjustment applied');
   };
 }
@@ -4535,11 +4707,14 @@ function showPlayerCard(pid) {
       } else if (!myLob || !gwHasStarted(0)) {
         btn('&#128239; Declare my Lobus', () => {
           ov.remove();
+          const crow = () => {
+            playSound('cheer');
+            toast(`LOBUS KLAXON — ${p.name} is now ${managerName(whoami)}'s Lobus. Big unit. Great feet for a big man.`);
+          };
+          if (netOn()) { serverAct('lobusDeclare', { pid }).then(crow).catch(() => {}); return; }
           state.lobus[whoami] = pid;
-          pushShared(`lobus/${whoami}`, pid);
           save(); render();
-          playSound('cheer');
-          toast(`LOBUS KLAXON — ${p.name} is now ${managerName(whoami)}'s Lobus. Big unit. Great feet for a big man.`);
+          crow();
         }, true);
       }
     }
@@ -4603,11 +4778,13 @@ if (new URLSearchParams(location.search).has('demo')) enterDemo();
 // fresh, or waiverOrder would fall back to reverse-draft order and resolve
 // every claim with the wrong priority
 function tryAutoWaivers(attempt = 0) {
-  if (!(netOn() && isCommissioner() && waiverRunDue())) return;
+  // online, the scheduled Cloud Function owns waiver runs — no device fires them
+  if (netOn()) return;
+  if (!(syncOn() && isCommissioner() && waiverRunDue())) return;
   const statsFresh = state.lastSync && (Date.now() - new Date(state.lastSync).getTime()) < 20 * 60 * 1000
     && Object.keys(state.matchStats || {}).length > 0;
-  if (cloudKnown && statsFresh) { processWaivers(false); return; }
-  if (attempt < 6) setTimeout(() => tryAutoWaivers(attempt + 1), 5000); // wait for cloud + feed
+  if (statsFresh) { processWaivers(false); return; }
+  if (attempt < 6) setTimeout(() => tryAutoWaivers(attempt + 1), 5000); // wait for the feed
 }
 setTimeout(() => tryAutoWaivers(), 4000);
 // auto-sync on load during the tournament (max once per 20 min, always if live,
@@ -4633,3 +4810,11 @@ async function checkBuild() {
 }
 checkBuild();
 setInterval(checkBuild, 10 * 60 * 1000);
+
+// Cache the app shell for flaky draft-night Wi-Fi. Live league writes still go
+// straight to Firebase; the worker only makes the interface itself resilient.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(e => console.warn('[sw]', e));
+  });
+}

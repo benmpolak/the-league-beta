@@ -3,6 +3,7 @@
 // auto-subs, the Monzo Cup, and the GW34–36 playoffs. Runs against ?nosync.
 // Usage: python3 -m http.server 8125 &  then  node test/sim.test.js
 const puppeteer = require('puppeteer-core');
+const chromePath = process.env.CHROME_BIN || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 let failures = 0;
 const check = (label, ok, detail = '') => {
@@ -12,7 +13,7 @@ const check = (label, ok, detail = '') => {
 
 (async () => {
   const browser = await puppeteer.launch({
-    executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    executablePath: chromePath,
     headless: 'new',
   });
   const p = await browser.newPage();
@@ -32,6 +33,21 @@ const check = (label, ok, detail = '') => {
     save(); render();
   });
   check('setup phase renders', await p.evaluate(() => state.phase === 'setup' && !!document.querySelector('#startDraftOrdered')));
+  const timerAudit = await p.evaluate(() => ({
+    before: draftDeadlineTiming(10_000, 7_000),
+    overdue: draftDeadlineTiming(10_000, 19_000),
+  }));
+  check('draft timer preserves overdue seconds for the on-clock fallback',
+    timerAudit.before.left === 3 && timerAudit.before.overBy === 0
+      && timerAudit.overdue.left === 0 && timerAudit.overdue.overBy === 9,
+    JSON.stringify(timerAudit));
+  const demoAudit = await p.evaluate(async () => {
+    await enterDemo();
+    return { current: currentGwIndex(), selected: teamView.gw, text: document.querySelector('main')?.innerText || '' };
+  });
+  check('demo opens on its populated GW1 instead of a blank real-world GW',
+    demoAudit.current === 0 && demoAudit.selected === 0 && /GW1/.test(demoAudit.text) && !/GW38 — Gameweek 38 \(current\)/.test(demoAudit.text));
+  await p.evaluate(() => exitDemo());
 
   // ---------- 1. draft: ordered start, engine-run 168 picks ----------
   await p.evaluate(() => document.querySelector('#startDraftOrdered').click());

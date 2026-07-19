@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: league-backup
@@ -15,16 +15,41 @@ concurrency:
 jobs:
   backup:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Snapshot the league from Firebase
-        run: python3 scripts/backup_league.py
-      - name: Commit if changed
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fail loudly if the service-account secret is missing
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: |
-          git config user.name 'league-backup-bot'
-          git config user.email 'actions@github.com'
-          git add data/backups/
-          if ! git diff --cached --quiet; then
-            git commit -m "backup: league state $(date -u '+%Y-%m-%d %H:%M')"
-            git push
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT secret is not set — the backup cannot authenticate. See README → Secrets." >&2
+            exit 1
           fi
+      - name: Install firebase-admin
+        run: npm i firebase-admin --no-save
+      - name: Write service-account credential outside the checkout
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          umask 077
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
+      - name: Snapshot the league from Firebase
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/sa.json
+          LEAGUE_BACKUP_DIR: ${{ runner.temp }}/league-backup
+        run: node scripts/backup_league.js
+      # backups are never committed — the v2 snapshot holds manager-private data
+      - name: Store private backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: league-backup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/league-backup/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Shred temp credential
+        if: always()
+        run: rm -f "$RUNNER_TEMP/sa.json"

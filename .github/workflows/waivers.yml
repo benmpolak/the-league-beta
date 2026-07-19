@@ -1,3 +1,7 @@
+# RETIRED AT CUTOVER: waiver processing moves to a scheduled Cloud Function
+# (functions/) once the authenticated v2 schema goes live. This workflow is kept
+# only as a fallback and no-ops unless the repo variable LEGACY_WAIVERS is set
+# to 'true' (Settings -> Secrets and variables -> Actions -> Variables).
 name: Process waivers
 
 on:
@@ -11,13 +15,18 @@ concurrency:
 
 jobs:
   waivers:
+    if: vars.LEGACY_WAIVERS == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - name: Install puppeteer
-        run: npm install puppeteer@23
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
       - name: Run waivers through the live app
+        env:
+          CHROME_BIN: /usr/bin/google-chrome
         run: node scripts/run_waivers.js

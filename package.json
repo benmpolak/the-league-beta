@@ -1,0 +1,17 @@
+{
+  "name": "the-league",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "check": "node --check js/app.js && node --check js/engine.js && node --check functions/index.js && node --check scripts/run_waivers.js",
+    "test": "npm run check && npm run test:offline",
+    "test:offline": "node test/sim.test.js && node test/dgw.test.js && node test/engine.parity.test.js",
+    "test:emu": "DATA_BASE_URL=http://127.0.0.1:8126 firebase emulators:exec --config firebase.emu.json --project calciopoli-wc26 'node test/rules.test.js && node test/functions.test.js && node test/migrate.test.js'"
+  },
+  "dependencies": {
+    "puppeteer-core": "^25.3.0"
+  }
+}

@@ -1,0 +1,49 @@
+name: Test game engine
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Start local site
+        run: python3 -m http.server 8125 >/tmp/the-league-http.log 2>&1 &
+      - name: Run syntax and full-season tests
+        env:
+          CHROME_BIN: /usr/bin/google-chrome
+        run: npm test
+
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Install functions dependencies
+        run: npm ci --prefix functions
+      - name: Run rules, functions and migration tests against the emulator
+        env:
+          # functions fetch reference data from here; the test suites serve
+          # synthetic players/gameweeks on this port
+          DATA_BASE_URL: http://127.0.0.1:8126
+        run: npx firebase-tools emulators:exec --config firebase.emu.json --project calciopoli-wc26 "node test/rules.test.js && node test/functions.test.js && node test/migrate.test.js"

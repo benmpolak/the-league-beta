@@ -1,0 +1,38 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "leagues": {
+      "$league": { ".read": true }
+    },
+
+    "v2": {
+      "leagues": {
+        "$league": {
+          "public": {
+            ".read": true
+          },
+          "private": {
+            "$uid": {
+              ".read": "auth != null && auth.uid === $uid"
+            }
+          },
+          "server": {
+            "membership": {
+              "$uid": {
+                ".read": "auth != null && auth.uid === $uid"
+              }
+            },
+            "waiverRuns": {
+              ".read": true
+            },
+            "maintenance": {
+              ".read": true
+            }
+          }
+        }
+      }
+    }
+  }
+}
