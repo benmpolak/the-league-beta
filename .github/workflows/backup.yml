@@ -35,8 +35,8 @@ jobs:
             echo "::error::BACKUP_PASSPHRASE secret is not set — the v2 snapshot holds manager-private data and is only uploaded encrypted. See README → Secrets." >&2
             exit 1
           fi
-      - name: Install firebase-admin
-        run: npm i firebase-admin --no-save
+      - name: Install firebase-admin (the functions' pinned version — the scripts borrow it)
+        run: npm ci --prefix functions
       # the previous successful artifact gives shrink detection something real
       # to compare against — a fresh runner has no local previous file
       - name: Fetch previous backup artifact (manifest for comparison)
