@@ -40,6 +40,7 @@ const chk = (name, ok, detail = '') => {
         signOut: () => { calls.push({ action: '_signOut' }); return Promise.resolve(); },
       },
     };
+    window.onSyncConnection(true); // connected — mutations are allowed to dispatch
     // a season-phase public snapshot, no pins/claims/autolists (v2 shape)
     const s = freshState();
     s.phase = 'season';

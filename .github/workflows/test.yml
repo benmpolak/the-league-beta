@@ -2,16 +2,16 @@ name: Test game engine
 
 on:
   push:
-    branches: [main]
+    branches: [main, auth-v2]
   pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  offline-engine:
+  browser:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,14 +22,18 @@ jobs:
         run: npm ci
       - name: Start local site
         run: python3 -m http.server 8125 >/tmp/the-league-http.log 2>&1 &
-      - name: Run syntax and full-season tests
+      - name: Syntax, no-eval guard, feed validation, full season, DGW, engine parity
         env:
           CHROME_BIN: /usr/bin/google-chrome
         run: npm test
+      - name: Auth UI + offline UX browser smokes
+        env:
+          CHROME_BIN: /usr/bin/google-chrome
+        run: npm run test:browser
 
   emulator:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -41,9 +45,11 @@ jobs:
           java-version: 21
       - name: Install functions dependencies
         run: npm ci --prefix functions
-      - name: Run rules, functions and migration tests against the emulator
+      - name: Copy the engine into functions (same file the predeploy hook copies)
+        run: node -e "require('fs').copyFileSync('js/engine.js','functions/engine.js')"
+      - name: Rules, functions, migration, backup/restore and provisioning suites
         env:
-          # functions fetch reference data from here; the test suites serve
-          # synthetic players/gameweeks on this port
+          # functions fetch reference data from here; the suites generate and
+          # serve the synthetic players/gameweeks feed on this port themselves
           DATA_BASE_URL: http://127.0.0.1:8126
-        run: npx firebase-tools emulators:exec --config firebase.emu.json --project calciopoli-wc26 "node test/rules.test.js && node test/functions.test.js && node test/migrate.test.js"
+        run: npx firebase-tools emulators:exec --config firebase.emu.json --project calciopoli-wc26 "node test/rules.test.js && node test/functions.test.js && node test/migrate.test.js && node test/backup.test.js && node test/provision.test.js"

@@ -56,7 +56,9 @@ scoring engine shape and pomp are all inherited (Moggi stayed behind — differe
 ```
 npm ci
 python3 -m http.server 8125            # from the repo root, then:
-npm test                               # syntax + full season + DGW regression suite
+npm test                               # syntax + no-eval guard + feed validation + full season + DGW + parity
+npm run test:browser                   # auth UI + offline UX smokes (real Chrome, stubbed sync)
+npm run test:emu                       # rules + functions + migrate + backup + provision (Firebase emulators, needs Java; the suites serve their own synthetic feed on 8126)
 node test/e2e.multiclient.js           # 3 real browsers, multi-device fundamentals — port 8140
 node test/race.test.js                 # simultaneous-write races — port 8142
 node test/stress.test.js               # 8 clients, scrambles, offline/reconnect — port 8143
@@ -71,13 +73,16 @@ against the live database. Never point them at the real league key.
 - **Scores stale on a matchday** (amber "feed stale" pill): the FPL fetch Action
   is failing — check Actions. Fallback: `python3 scripts/fetch_fpl.py && git push`
   from any laptop. The site recovers on the next 15-min sync.
-- **Somebody wrecked the league state**: download the latest `league-backup-*`
-  artifact from the Backup league state Action, then (with
-  `GOOGLE_APPLICATION_CREDENTIALS` pointing at a service-account key) run
-  `node scripts/restore_league.js /path/to/league.json` — a file named
-  `league-v2.json` restores the v2 tree, anything else the legacy tree. Older
-  artifacts remain available for 90 days. Wipe protection still requires the
-  two-step reset ritual.
+- **Somebody wrecked the league state**: download the latest `league-backup`
+  artifact from the Backup league state Action. The v2 snapshot inside is
+  encrypted — decrypt with
+  `openssl enc -d -aes-256-cbc -pbkdf2 -in league-v2.json.enc -out league-v2.json`
+  (passphrase = the `BACKUP_PASSPHRASE` secret). Then, with
+  `GOOGLE_APPLICATION_CREDENTIALS` pointing at a service-account key:
+  `node scripts/restore_league.js league-v2.json --schema v2 --league the-league-2627`
+  — schema and league are always stated explicitly, nothing is inferred from
+  filenames, and a snapshot that doesn't match its declared schema is refused.
+  Artifacts remain available for 90 days.
 - **Firebase dies or the Google account is lost**: create a new Firebase project
   (free), change `databaseURL` + deploy `database.rules.json`, restore from the
   latest backup. One line in `js/sync.js` points the app at the new home.
@@ -107,20 +112,30 @@ the situation arises. Neither affects a normal single-gameweek week.
   key is written outside the checkout at runtime and shredded afterwards. For
   local backup/restore runs, point `GOOGLE_APPLICATION_CREDENTIALS` at the same
   file (kept OUTSIDE the repo).
+- **`BACKUP_PASSPHRASE`** (GitHub Actions secret): encrypts the v2 backup
+  artifact (it holds manager-private data — blind claims and autolists — and
+  artifacts on a public repo are downloadable by anyone with a GitHub account).
+  Pick a long random string and keep a copy in a password manager: a backup
+  you can't decrypt is not a backup. The workflow fails loudly without it.
 - **`LEGACY_WAIVERS`** (repo variable, not a secret): set to `true` only to
   re-enable the retired puppeteer waiver workflow as a fallback. Leave unset
   once the scheduled Cloud Function is live.
 
-## Deploying the database rules
-`database.rules.json` is deployed separately from the site (GitHub Pages only
-serves static files). After editing it:
+## Deploying rules and functions
+Rules are deployed separately from the site (GitHub Pages only serves static
+files), and only through the guarded commands — `firebase.json` deliberately
+names NO rules file, so a bare `deploy --only database` fails instead of
+silently picking one:
 ```
-npx firebase-tools deploy --only database
+npm run deploy:cutover-rules     # database.rules.v2.json — FREEZES all legacy writes
+npm run rollback:legacy-rules    # database.rules.json — re-opens the legacy world
+npm run deploy:functions         # the mutation layer + waiver cron
 ```
-At cutover, `database.rules.v2.json` replaces `database.rules.json` (see
-MIGRATION-RUNBOOK.md) — from then on clients cannot write the database at all,
-so the old SHARED_KEYS/rules lockstep concern disappears: writes only happen in
-`functions/index.js` via the Admin SDK, and the emulator suites are the check.
+Each shows the exact config + rules file (with hash) and requires a typed,
+mode-specific confirmation. After cutover clients cannot write the database at
+all, so the old SHARED_KEYS/rules lockstep concern disappears: writes only
+happen in `functions/index.js` via the Admin SDK, and the emulator suites are
+the check.
 
 ## Going authenticated — one-time Firebase console steps (Ben)
 Everything else is scripted; these five can only be done by a human with owner
@@ -144,7 +159,7 @@ access on the `calciopoli-wc26` project (console.firebase.google.com):
 Then, from the repo (CLI is already logged in):
 ```
 node scripts/provision_managers.js --live        # after filling managers.local.json
-npx firebase-tools deploy --only functions       # the mutation layer + waiver cron
+npm run deploy:functions                         # the mutation layer + waiver cron
 ```
 and follow MIGRATION-RUNBOOK.md for the rules cutover.
 

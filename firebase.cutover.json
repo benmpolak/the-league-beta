@@ -1,0 +1,6 @@
+{
+  "_comment": "CUTOVER config: deploys database.rules.v2.json, which FREEZES all legacy writes (including the old client). Use only via `npm run deploy:cutover-rules`.",
+  "database": {
+    "rules": "database.rules.v2.json"
+  }
+}

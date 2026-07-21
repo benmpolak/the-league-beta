@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read           # to fetch the previous backup artifact for shrink detection
 
 concurrency:
   group: league-backup
@@ -21,32 +22,67 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Fail loudly if the service-account secret is missing
+      - name: Fail loudly if required secrets are missing
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
         run: |
           if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
             echo "::error::FIREBASE_SERVICE_ACCOUNT secret is not set — the backup cannot authenticate. See README → Secrets." >&2
             exit 1
           fi
+          if [ -z "$BACKUP_PASSPHRASE" ]; then
+            echo "::error::BACKUP_PASSPHRASE secret is not set — the v2 snapshot holds manager-private data and is only uploaded encrypted. See README → Secrets." >&2
+            exit 1
+          fi
       - name: Install firebase-admin
         run: npm i firebase-admin --no-save
+      # the previous successful artifact gives shrink detection something real
+      # to compare against — a fresh runner has no local previous file
+      - name: Fetch previous backup artifact (manifest for comparison)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/prev-backup"
+          ART_ID=$(gh api "/repos/${{ github.repository }}/actions/artifacts?name=league-backup&per_page=10" \
+            --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id' 2>/dev/null || true)
+          if [ -n "$ART_ID" ] && [ "$ART_ID" != "null" ]; then
+            gh api "/repos/${{ github.repository }}/actions/artifacts/$ART_ID/zip" > "$RUNNER_TEMP/prev.zip"
+            unzip -o "$RUNNER_TEMP/prev.zip" -d "$RUNNER_TEMP/prev-backup" || true
+            echo "previous artifact $ART_ID fetched"
+          else
+            echo "no previous artifact found (first run or all expired)"
+          fi
       - name: Write service-account credential outside the checkout
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: |
           umask 077
           printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
-      - name: Snapshot the league from Firebase
+      - name: Snapshot the league from Firebase (validated)
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/sa.json
           LEAGUE_BACKUP_DIR: ${{ runner.temp }}/league-backup
+          PREV_BACKUP_DIR: ${{ runner.temp }}/prev-backup
         run: node scripts/backup_league.js
-      # backups are never committed — the v2 snapshot holds manager-private data
-      - name: Store private backup artifact
+      # the v2 snapshot holds manager-private data (blind claims, autolists).
+      # Artifacts on a public repo are downloadable by anyone with a GitHub
+      # account, so it is only ever uploaded encrypted.
+      - name: Encrypt the v2 snapshot
+        env:
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -e
+          DIR="$RUNNER_TEMP/league-backup"
+          if [ -f "$DIR/league-v2.json" ]; then
+            openssl enc -aes-256-cbc -pbkdf2 -pass env:BACKUP_PASSPHRASE \
+              -in "$DIR/league-v2.json" -out "$DIR/league-v2.json.enc"
+            rm "$DIR/league-v2.json"
+          fi
+      - name: Store backup artifact
         uses: actions/upload-artifact@v4
         with:
-          name: league-backup-${{ github.run_id }}-${{ github.run_attempt }}
+          name: league-backup
           path: ${{ runner.temp }}/league-backup/
           if-no-files-found: error
           retention-days: 90

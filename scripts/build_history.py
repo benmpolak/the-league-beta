@@ -52,5 +52,11 @@ out = (
 )
 
 (root / 'js' / 'history25.js').write_text(out, encoding='utf-8')
-print(f'js/history25.js written — {len(by_code)} players, '
+
+# pure-JSON mirror for the server (parsed as data, never executed)
+(root / 'data' / 'history25.json').write_text(json.dumps(
+    {'season': players['season'], 'byCode': by_code},
+    ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
+
+print(f'js/history25.js + data/history25.json written — {len(by_code)} players, '
       f'{len(season_block["matches"])} matches')

@@ -190,6 +190,177 @@ const SB = 'the-league-sandbox';
   chk('autopick was deterministic best-available for the on-clock manager', picks.length === 2 && picks[1].managerId === 2);
   chk('timewaste for someone else\'s clock rejected', (await T.mutate(SB, 'draftAdmin', { op: 'timewaste' }, sbTok2)).error?.status === 'PERMISSION_DENIED');
 
+  /* ---------------- membership is the only authority ----------------
+   * custom claims are a stale hint at best: revoked, downgraded or
+   * mismatched claims never grant anything — the server-owned membership
+   * node decides, every time. */
+  const auth = T.initAdmin().auth();
+  // pruned user: token still carries a manager claim, membership is gone
+  const ghost = await auth.createUser({ email: 'ghost@test.local' });
+  await auth.setCustomUserClaims(ghost.uid, { leagues: { [LG]: { managerId: 2, role: 'manager' } } });
+  const ghostTok = await T.idTokenFor(ghost.uid); // claim baked into the token
+  const ghostTry = await T.mutate(LG, 'autolistSet', { pids: [players[0].id] }, ghostTok);
+  chk('pruned user with a stale manager claim is rejected', ghostTry.error?.status === 'PERMISSION_DENIED', JSON.stringify(ghostTry.error));
+  // downgraded commissioner: token says commissioner, membership says manager
+  const demoted = await auth.createUser({ email: 'demoted@test.local' });
+  await auth.setCustomUserClaims(demoted.uid, { leagues: { [LG]: { managerId: 3, role: 'commissioner' } } });
+  await T.initAdmin().database().ref(`v2/leagues/${LG}/server/membership/${demoted.uid}`).set({ managerId: 3, role: 'manager' });
+  const demotedTok = await T.idTokenFor(demoted.uid);
+  const demTry = await T.mutate(LG, 'settingsSet', { scoringKey: 'assist', value: 9 }, demotedTok);
+  chk('downgraded commissioner cannot use commissioner actions', demTry.error?.status === 'PERMISSION_DENIED', JSON.stringify(demTry.error));
+  chk('downgraded commissioner still acts as their (membership) self', !(await T.mutate(LG, 'autolistSet', { pids: [players[0].id] }, demotedTok)).error);
+  // mismatched managerId: claim says 3, membership says 2 — membership wins
+  const shifty = await auth.createUser({ email: 'shifty@test.local' });
+  await auth.setCustomUserClaims(shifty.uid, { leagues: { [LG]: { managerId: 3, role: 'manager' } } });
+  await T.initAdmin().database().ref(`v2/leagues/${LG}/server/membership/${shifty.uid}`).set({ managerId: 2, role: 'manager' });
+  const shiftyTok = await T.idTokenFor(shifty.uid);
+  const sq3now = await squadOf(3);
+  const xiFrom3 = [...byPos(sq3now, 'GK').slice(0, 1), ...byPos(sq3now, 'DF').slice(0, 4), ...byPos(sq3now, 'MF').slice(0, 4), ...byPos(sq3now, 'FW').slice(0, 2)];
+  const asWrong = await T.mutate(LG, 'lineupSave', { gw: 3, xi: xiFrom3 }, shiftyTok);
+  chk('mismatched claim resolves to MEMBERSHIP identity (manager 3 squad rejected)', asWrong.error?.status === 'INVALID_ARGUMENT', JSON.stringify(asWrong.error));
+  const sq2now = await squadOf(2);
+  const xiFrom2 = [...byPos(sq2now, 'GK').slice(0, 1), ...byPos(sq2now, 'DF').slice(0, 4), ...byPos(sq2now, 'MF').slice(0, 4), ...byPos(sq2now, 'FW').slice(0, 2)];
+  chk('mismatched claim acts safely as the membership manager', !(await T.mutate(LG, 'lineupSave', { gw: 3, xi: xiFrom2 }, shiftyTok)).error);
+
+  /* ---------------- server-side rule gaps closed ---------------- */
+  // benchOrder locks at kickoff exactly like lineupSave
+  const bench2 = (await squadOf(2)).slice(0, 3);
+  chk('bench order for a future GW works', !(await T.mutate(LG, 'benchOrder', { gw: 3, pids: bench2 }, tok2)).error);
+  chk('bench order after kickoff rejected', (await T.mutate(LG, 'benchOrder', { gw: 1, pids: bench2 }, tok2)).error?.status === 'FAILED_PRECONDITION');
+  chk('bench order with a repeat rejected', (await T.mutate(LG, 'benchOrder', { gw: 3, pids: [bench2[0], bench2[0]] }, tok2)).error?.status === 'INVALID_ARGUMENT');
+  // autolist validation
+  chk('autolist with unknown player rejected', (await T.mutate(LG, 'autolistSet', { pids: [999999] }, tok2)).error?.status === 'INVALID_ARGUMENT');
+  chk('autolist with duplicates rejected', (await T.mutate(LG, 'autolistSet', { pids: [players[0].id, players[0].id] }, tok2)).error?.status === 'INVALID_ARGUMENT');
+  chk('oversized autolist rejected', (await T.mutate(LG, 'autolistSet', { pids: Array.from({ length: 301 }, (_, i) => i + 1) }, tok2)).error?.status === 'INVALID_ARGUMENT');
+  // claim validation: ownership, drop legality, squad shape, caps
+  const freeFWs = freeOf('FW');
+  const myFW2 = byPos(await squadOf(2), 'FW')[0];
+  chk('claim naming an unknown player rejected', (await T.mutate(LG, 'claimSet', { gwIndex: curGw, claims: [{ in: 999999, out: myFW2 }] }, tok2)).error?.status === 'INVALID_ARGUMENT');
+  chk('claim dropping a player you do not own rejected', (await T.mutate(LG, 'claimSet', { gwIndex: curGw, claims: [{ in: freeFWs[0], out: (await squadOf(1))[0] }] }, tok2)).error?.status === 'FAILED_PRECONDITION');
+  chk('claim for a player you already own rejected', (await T.mutate(LG, 'claimSet', { gwIndex: curGw, claims: [{ in: myFW2, out: myFW2 }] }, tok2)).error?.status === 'FAILED_PRECONDITION');
+  const myDF2 = byPos(await squadOf(2), 'DF')[0];
+  const freeGK2 = freeOf('GK')[0];
+  chk('shape-breaking claim rejected', (await T.mutate(LG, 'claimSet', { gwIndex: curGw, claims: [{ in: freeGK2, out: myDF2 }] }, tok2)).error?.status === 'FAILED_PRECONDITION');
+  chk('claim flood rejected (max 30)', (await T.mutate(LG, 'claimSet', { gwIndex: curGw, claims: Array.from({ length: 31 }, () => ({ in: freeFWs[0], out: myFW2 })) }, tok2)).error?.status === 'INVALID_ARGUMENT');
+  // squad-rule settings validated as a consistent ruleset
+  chk('squad rules are locked outside setup phase', (await T.mutate(LG, 'settingsSet', { key: 'squadSize', value: 20 }, tok1)).error?.status === 'FAILED_PRECONDITION');
+  chk('scoring value bounds enforced', (await T.mutate(LG, 'settingsSet', { scoringKey: 'assist', value: 5000 }, tok1)).error?.status === 'INVALID_ARGUMENT');
+  // oversized XI payloads die at the gate
+  chk('oversized xi rejected', (await T.mutate(LG, 'lineupSave', { gw: 3, xi: Array.from({ length: 40 }, (_, i) => i) }, tok1)).error?.status === 'INVALID_ARGUMENT');
+  // importState: strict schema
+  chk('import with unknown key rejected', (await T.mutate(LG, 'importState', { state: { ...seed, evilKey: 1 } }, tok1)).error?.status === 'INVALID_ARGUMENT');
+  chk('import with bad phase rejected', (await T.mutate(LG, 'importState', { state: { ...seed, phase: 'chaos' } }, tok1)).error?.status === 'INVALID_ARGUMENT');
+  chk('import with inconsistent squad rules rejected', (await T.mutate(LG, 'importState', { state: { ...seed, settings: { ...seed.settings, posMin: { GK: 0, DF: 3, MF: 3, FW: 1 } } } }, tok1)).error?.status === 'INVALID_ARGUMENT');
+  chk('import with oversized section rejected', (await T.mutate(LG, 'importState', { state: { ...seed, transfers: Array.from({ length: 5001 }, () => ({ x: 1 })) } }, tok1)).error?.status === 'INVALID_ARGUMENT');
+  chk('import with junk manager entry rejected', (await T.mutate(LG, 'importState', { state: { ...seed, managers: [{ id: 1, name: 'A', team: 'B', pin: '1234' }, { id: 2, name: 'C', team: 'D' }] } }, tok1)).error?.status === 'INVALID_ARGUMENT');
+  chk('legacy export debris (pins) tolerated and dropped', !(await T.mutate(LG, 'importState', { state: { ...seed, pins: { 1: 'x' } } }, tok1)).error
+    && !(await T.initAdmin().database().ref(`v2/leagues/${LG}/public/pins`).get()).val());
+
+  /* ---------------- window draft: one atomic transaction ---------------- */
+  // (the re-import above rebuilt LG in season phase with fresh squads)
+  const mkArrival = async pid => T.initAdmin().database().ref(`v2/leagues/${LG}/public/draftPool/ids/${pid}`).set('Wrexham');
+  const wdFree = freeOf('MF').slice(-4); // untouched by earlier signings
+  await mkArrival(wdFree[0]); await mkArrival(wdFree[1]);
+  chk('window draft start is Chairman-only', (await T.mutate(LG, 'windowDraft', { op: 'start' }, tok2)).error?.status === 'PERMISSION_DENIED');
+  chk('Chairman opens the window draft', !(await T.mutate(LG, 'windowDraft', { op: 'start' }, tok1)).error);
+  // order is draft order reversed => [3,2,1]; turn 0 belongs to manager 3
+  const wdBefore = (await db.ref(`v2/leagues/${LG}/public/transfers`).get()).val();
+  const wdCount0 = wdBefore ? Object.keys(wdBefore).length : 0;
+  // injected failure before the transaction: nothing may change
+  const fpWd = await T.mutate(LG, 'windowDraft', { op: 'pick', inId: wdFree[0], outId: byPos(await squadOf(3), 'MF')[0], expectedTurn: 0, __failpoint: 'wd:beforeTxn' }, tok3);
+  chk('wd failpoint fails the call', !!fpWd.error, JSON.stringify(fpWd.result));
+  const wdMid = (await db.ref(`v2/leagues/${LG}/public/windowDraft`).get()).val();
+  const wdTr1 = (await db.ref(`v2/leagues/${LG}/public/transfers`).get()).val();
+  chk('failed wd call left no partial state', (wdMid.turn || 0) === 0 && (wdTr1 ? Object.keys(wdTr1).length : 0) === wdCount0);
+  // two rival picks for the same turn: exactly one commits, state moves once
+  const out3a = byPos(await squadOf(3), 'MF')[0], out3b = byPos(await squadOf(3), 'MF')[1];
+  const [w1, w2] = await Promise.all([
+    T.mutate(LG, 'windowDraft', { op: 'pick', inId: wdFree[0], outId: out3a, expectedTurn: 0 }, tok3),
+    T.mutate(LG, 'windowDraft', { op: 'pick', inId: wdFree[1], outId: out3b, expectedTurn: 0 }, tok3),
+  ]);
+  chk('same-turn window picks: exactly one lands', [w1, w2].filter(r => !r.error).length === 1, JSON.stringify([w1.error, w2.error]));
+  const wdNow = (await db.ref(`v2/leagues/${LG}/public/windowDraft`).get()).val();
+  const wdTr2 = (await db.ref(`v2/leagues/${LG}/public/transfers`).get()).val();
+  chk('turn advanced exactly once, one pick recorded, one transfer appended',
+    wdNow.turn === 1 && Object.keys(wdNow.picks || {}).length === 1
+    && (wdTr2 ? Object.keys(wdTr2).length : 0) === wdCount0 + 1, JSON.stringify(wdNow));
+  chk('out-of-turn window pick rejected', (await T.mutate(LG, 'windowDraft', { op: 'pick', inId: wdFree[1], outId: byPos(await squadOf(3), 'MF')[0], expectedTurn: 1 }, tok3)).error?.status === 'PERMISSION_DENIED');
+  // a full lap of passes finishes the window IN the same transaction
+  chk('pass (manager 2)', !(await T.mutate(LG, 'windowDraft', { op: 'pass', expectedTurn: 1 }, tok2)).error);
+  chk('pass (manager 1)', !(await T.mutate(LG, 'windowDraft', { op: 'pass', expectedTurn: 2 }, tok1)).error);
+  const lastPass = await T.mutate(LG, 'windowDraft', { op: 'pass', expectedTurn: 3 }, tok1); // snake: lap 2 starts back at 1
+  chk('third consecutive pass closes the window', !lastPass.error && lastPass.result?.status === 'done', JSON.stringify(lastPass));
+  const poolAfter = (await db.ref(`v2/leagues/${LG}/public/draftPool/ids/${wdFree[1]}`).get()).val();
+  chk('draftPool refreshed in the same commit (leftover arrival unlocked)', poolAfter !== 'Wrexham');
+  chk('acting on a finished window rejected', (await T.mutate(LG, 'windowDraft', { op: 'pass' }, tok1)).error?.status === 'FAILED_PRECONDITION');
+
+  /* ---------------- waivers: recoverable, effectively exactly-once ---------------- */
+  const wFree = freeOf('FW');
+  const claimFor2 = { in: wFree[0], out: byPos(await squadOf(2), 'FW')[0] };
+  chk('fresh claim lodged', !(await T.mutate(LG, 'claimSet', { gwIndex: curGw, claims: [claimFor2] }, tok2)).error);
+  const trCount = async () => Object.keys((await db.ref(`v2/leagues/${LG}/public/transfers`).get()).val() || {}).length;
+  const beforeFp1 = await trCount();
+  // crash AFTER the plan is written, BEFORE any transfer lands
+  const fp1 = await T.mutate(LG, 'waiverRunNow', { runId: 'fp1', __failpoint: 'waivers:afterPlan' }, tok1);
+  chk('failpoint after plan: call fails', !!fp1.error);
+  const fp1rec = (await db.ref(`v2/leagues/${LG}/server/waiverRuns/manual-fp1`).get()).val();
+  chk('crashed run keeps its plan for replay', fp1rec?.status === 'failed' && !!fp1rec?.plan, JSON.stringify(fp1rec?.status));
+  chk('no transfers landed before the crash', await trCount() === beforeFp1);
+  const fp1claims = (await db.ref(`v2/leagues/${LG}/private/${members[2].uid}/claims`).get()).val();
+  chk('claims survive the crash (nothing half-cleared)', !!fp1claims);
+  // replay the SAME run id: completes exactly once
+  const fp1retry = await T.mutate(LG, 'waiverRunNow', { runId: 'fp1' }, tok1);
+  chk('replay completes the crashed run', !fp1retry.error && (fp1retry.result?.executed || []).some(e => e.in === claimFor2.in), JSON.stringify(fp1retry));
+  chk('replay landed the transfer exactly once', await trCount() === beforeFp1 + 1);
+  chk('claims cleared by the replay', !(await db.ref(`v2/leagues/${LG}/private/${members[2].uid}/claims`).get()).val());
+  const fp1done = (await db.ref(`v2/leagues/${LG}/server/waiverRuns/manual-fp1`).get()).val();
+  chk('audit record: done, executed and applied recorded', fp1done?.status === 'done' && Array.isArray(fp1done?.executed) && fp1done?.applied === 1, JSON.stringify(fp1done?.status));
+  chk('re-running a done run is a no-op skip', (await T.mutate(LG, 'waiverRunNow', { runId: 'fp1' }, tok1)).result?.skipped === 'already processed');
+  // crash AFTER transfers landed, BEFORE claims cleared: replay must not duplicate
+  const claimFor3 = { in: wFree[1], out: byPos(await squadOf(3), 'FW')[0] };
+  chk('second claim lodged', !(await T.mutate(LG, 'claimSet', { gwIndex: curGw, claims: [claimFor3] }, tok3)).error);
+  const beforeFp2 = await trCount();
+  const fp2 = await T.mutate(LG, 'waiverRunNow', { runId: 'fp2', __failpoint: 'waivers:afterTransfers' }, tok1);
+  chk('failpoint after transfers: call fails', !!fp2.error);
+  chk('transfer HAD landed before the crash', await trCount() === beforeFp2 + 1);
+  const fp2retry = await T.mutate(LG, 'waiverRunNow', { runId: 'fp2' }, tok1);
+  chk('replay after post-transfer crash completes', !fp2retry.error, JSON.stringify(fp2retry.error));
+  chk('NO duplicate transfer on replay', await trCount() === beforeFp2 + 1);
+  const fp2recs = Object.values((await db.ref(`v2/leagues/${LG}/public/transfers`).get()).val() || {})
+    .filter(t => t && t.runId === 'manual-fp2');
+  chk('exactly one ledger record carries the run id', fp2recs.length === 1);
+  chk('claims cleared after replay', !(await db.ref(`v2/leagues/${LG}/private/${members[3].uid}/claims`).get()).val());
+  // a live lease is an ERROR to callers — never a hollow success
+  await db.ref(`v2/leagues/${LG}/server/waiverRuns/manual-lease1`).set({ status: 'running', startedAt: Date.now() });
+  const leased = await T.mutate(LG, 'waiverRunNow', { runId: 'lease1' }, tok1);
+  chk('live lease returns an error, not success', !!leased.error, JSON.stringify(leased.result));
+  // an EXPIRED lease is re-claimed and the work completes
+  await db.ref(`v2/leagues/${LG}/server/waiverRuns/manual-lease1`).update({ startedAt: Date.now() - 10 * 60 * 1000 });
+  const reclaimed = await T.mutate(LG, 'waiverRunNow', { runId: 'lease1' }, tok1);
+  chk('expired lease re-claimed and completed', !reclaimed.error, JSON.stringify(reclaimed.error));
+  chk('re-claimed run recorded done', (await db.ref(`v2/leagues/${LG}/server/waiverRuns/manual-lease1`).get()).val()?.status === 'done');
+
+  /* ---------------- reset: atomic, canonical, immediately usable ---------------- */
+  chk('reset is Chairman-only', (await T.mutate(LG, 'resetLeague', { confirm: 'RESET' }, tok2)).error?.status === 'PERMISSION_DENIED');
+  chk('reset demands the confirm word', (await T.mutate(LG, 'resetLeague', { confirm: 'yes?' }, tok1)).error?.status === 'FAILED_PRECONDITION');
+  const rr = await T.mutate(LG, 'resetLeague', { confirm: 'RESET' }, tok1);
+  chk('confirmed reset succeeds', !rr.error, JSON.stringify(rr.error));
+  const pubAfter = (await db.ref(`v2/leagues/${LG}/public`).get()).val();
+  chk('reset installs a valid setup state (phase + managers + settings)',
+    pubAfter?.phase === 'setup' && Object.keys(pubAfter?.managers || {}).length === 3
+    && pubAfter?.settings?.squadSize === 14, JSON.stringify(Object.keys(pubAfter || {})));
+  chk('reset cleared game state (no transfers/trades/lineups)', !pubAfter.transfers && !pubAfter.trades && !pubAfter.lineups);
+  chk('reset cleared private data and run logs',
+    !(await db.ref(`v2/leagues/${LG}/private`).get()).val()
+    && !(await db.ref(`v2/leagues/${LG}/server/waiverRuns`).get()).val());
+  chk('membership SURVIVED the reset', !!(await db.ref(`v2/leagues/${LG}/server/membership/${members[1].uid}`).get()).val());
+  // every client action works immediately: the commissioner starts a new draft
+  const restart = await T.mutate(LG, 'draftAdmin', { op: 'start', order: [2, 3, 1] }, tok1);
+  chk('commissioner can start a new draft straight after reset', !restart.error, JSON.stringify(restart.error));
+  chk('league is drafting again', (await db.ref(`v2/leagues/${LG}/public/phase`).get()).val() === 'draft');
+  const firstPick = await T.mutate(LG, 'draftPick', { playerId: players.find(p => p.pos === 'GK').id, expectedCount: 0 }, tok2);
+  chk('first pick of the new era lands', !firstPick.error, JSON.stringify(firstPick.error));
+
   server.close();
   run.done();
 })().catch(e => { console.error(e); process.exit(1); });

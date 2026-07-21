@@ -35,7 +35,8 @@ if (LIVE && emu) {
   process.exit(1);
 }
 
-const cfgPath = path.join(__dirname, '..', 'managers.local.json');
+// MANAGERS_FILE override exists for the emulator test suite only
+const cfgPath = process.env.MANAGERS_FILE || path.join(__dirname, '..', 'managers.local.json');
 if (!fs.existsSync(cfgPath)) {
   console.error('managers.local.json not found (see header of this script for the shape).');
   process.exit(1);
@@ -61,24 +62,45 @@ const db = admin.database();
     }
     const leagues = {};
     for (const lg of cfg.leagues) leagues[lg] = { managerId: m.managerId, role };
+    // claims are a client-side hint only (the server always checks membership),
+    // kept in sync here so the UI reflects reality after a token refresh
     await admin.auth().setCustomUserClaims(user.uid, { leagues });
     for (const lg of cfg.leagues) {
       await db.ref(`v2/leagues/${lg}/server/membership/${user.uid}`).set({ managerId: m.managerId, role });
-      await db.ref(`v2/leagues/${lg}/server/managerUid/${m.managerId}`).set(user.uid);
     }
     report.push({ managerId: m.managerId, uid: user.uid, role });
   }
-  // prune membership entries for users no longer in the file
+  const keep = new Set(report.filter(r => r.uid).map(r => r.uid));
+  const prunedUids = new Set();
   for (const lg of cfg.leagues) {
+    // managerUid is rebuilt wholesale from the file, so a reassigned or removed
+    // manager can never leave a stale managerId -> uid mapping behind
+    const uidMap = {};
+    for (const r of report) if (r.uid && Number.isInteger(r.managerId)) uidMap[r.managerId] = r.uid;
+    await db.ref(`v2/leagues/${lg}/server/managerUid`).set(uidMap);
+    // prune membership entries for users no longer in the file
     const snap = await db.ref(`v2/leagues/${lg}/server/membership`).get();
-    const keep = new Set(report.map(r => r.uid));
     const val = snap.val() || {};
     for (const uid of Object.keys(val)) {
       if (!keep.has(uid)) {
         await db.ref(`v2/leagues/${lg}/server/membership/${uid}`).remove();
+        prunedUids.add(uid);
         report.push({ pruned: uid, league: lg });
       }
     }
+  }
+  // a pruned user's custom claims are cleared for these leagues too — the
+  // claim is only a hint, but a stale hint helps nobody
+  for (const uid of prunedUids) {
+    try {
+      const u = await admin.auth().getUser(uid);
+      const claims = { ...(u.customClaims || {}) };
+      const lgs = { ...(claims.leagues || {}) };
+      for (const lg of cfg.leagues) delete lgs[lg];
+      claims.leagues = Object.keys(lgs).length ? lgs : null;
+      await admin.auth().setCustomUserClaims(uid, claims);
+      report.push({ claimsCleared: uid });
+    } catch { /* auth user already deleted — nothing to clear */ }
   }
   console.log(JSON.stringify({ target: LIVE ? 'LIVE' : 'emulator', provisioned: report }, null, 2));
   process.exit(0);

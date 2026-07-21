@@ -1,0 +1,6 @@
+{
+  "_comment": "ROLLBACK config: redeploys the legacy database.rules.json, re-opening legacy writes. Use only via `npm run rollback:legacy-rules`.",
+  "database": {
+    "rules": "database.rules.json"
+  }
+}

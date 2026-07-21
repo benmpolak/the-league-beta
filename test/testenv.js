@@ -58,6 +58,11 @@ function genTestData() {
   fs.writeFileSync(path.join(dir, 'js', 'data.js'),
     `const TEAMS = ${JSON.stringify(teams)};\nconst PLAYERS = ${JSON.stringify(players)};\nconst GAMEWEEKS_RAW = ${JSON.stringify(gws)};\n`);
   fs.writeFileSync(path.join(dir, 'js', 'history25.js'), 'const LAST_SEASON = {season: "test", byCode: {}};\n');
+  // the server consumes ONLY the pure-JSON feed (it never executes fetched JS)
+  fs.writeFileSync(path.join(dir, 'data', 'data.json'),
+    JSON.stringify({ generated: new Date().toISOString(), teams, players, gameweeks: gws }));
+  fs.writeFileSync(path.join(dir, 'data', 'history25.json'),
+    JSON.stringify({ season: 'test', byCode: {} }));
   fs.writeFileSync(path.join(dir, 'data', 'stats.json'),
     JSON.stringify({ generated: new Date().toISOString(), currentGw: 2, gws: { 1: { finished: true, stats: gw1stats }, 2: { finished: false, stats: {} } } }));
   fs.writeFileSync(path.join(dir, 'data', 'fixtures.json'), '[]');

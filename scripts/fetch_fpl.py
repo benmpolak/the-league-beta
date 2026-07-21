@@ -104,6 +104,15 @@ def main():
     )
     (ROOT / 'js' / 'data.js').write_text(data_js, encoding='utf-8')
 
+    # pure-JSON mirror of data.js for the server (Cloud Functions parse this as
+    # data — they never execute fetched code)
+    (ROOT / 'data' / 'data.json').write_text(json.dumps({
+        'generated': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'teams': teams,
+        'players': players,
+        'gameweeks': gameweeks,
+    }, ensure_ascii=False), encoding='utf-8')
+
     # fixtures
     fx = get(f'{BASE}/fixtures/')
     fixtures = [{

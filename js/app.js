@@ -166,9 +166,23 @@ function syncIdentity() {
 const isCommissioner = () => netOn() ? membership?.role === 'commissioner' : whoami === state.managers[0]?.id;
 // the one write path when online: a server-side mutation. The authoritative
 // result comes back via the snapshot listener; errors surface as toasts.
+// Callable mutations do NOT queue offline — while disconnected the game is
+// read-only and every attempt fails immediately with a reconnect message.
+// One in-flight request per action: no double submissions from double taps.
+const _actPending = new Set();
 function serverAct(action, data = {}) {
+  const refuse = msg => {
+    toast(msg);
+    const p = Promise.reject(new Error(msg));
+    p.catch(() => {}); // pre-handled: call sites may not attach their own catch
+    return p;
+  };
+  if (netOn() && !syncConnected) return refuse('You’re offline — the league is read-only until you reconnect.');
+  if (_actPending.has(action)) return refuse('Still sending the last one — give it a second.');
+  _actPending.add(action);
   return window.WCSync.call(action, data)
-    .catch(e => { toast(e.message || 'The Committee refused that one.'); throw e; });
+    .catch(e => { toast(e.message || 'The Committee refused that one.'); throw e; })
+    .finally(() => _actPending.delete(action));
 }
 const canActFor = mid => demoMode || !syncOn() || whoami === mid || isCommissioner();
 // use for actions: blocks other managers, and makes the commissioner explicitly
@@ -1848,7 +1862,7 @@ function renderSyncArea() {
     if (ageH > 1.5) bits.push(`<span class="tag" style="background:#4a3a10;color:#ffd98a" title="The stats feed normally refreshes every 15 minutes on matchdays. Scores may be lagging.">&#9888; feed ${ageH < 2 ? '90m' : Math.round(ageH) + 'h'} stale</span>`);
   }
   if (syncOn()) {
-    bits.push(`<span class="conn ${syncConnected ? 'up' : ''}" role="status" aria-label="${syncConnected ? 'Live sync connected' : 'Live sync reconnecting; changes will queue'}" title="${syncConnected ? 'Live sync: connected' : 'Live sync: reconnecting — changes will queue'}">&#9679;</span>`);
+    bits.push(`<span class="conn ${syncConnected ? 'up' : ''}" role="status" aria-label="${syncConnected ? 'Live sync connected' : 'Offline — the league is read-only until you reconnect'}" title="${syncConnected ? 'Live sync: connected' : 'Offline — the league is read-only until you reconnect'}">&#9679;</span>`);
     const who = whoami === -1 ? 'Spectating' : (whoami ? esc(managerName(whoami)) : 'Sign in');
     const whoTitle = netOn() ? (authUser ? 'Signed in — tap to sign out' : 'Sign in') : 'Switch who this device acts as';
     bits.push(`<button class="tag" id="whoBtn" style="cursor:pointer" title="${whoTitle}">${who}</button>`);
@@ -3186,7 +3200,7 @@ function bindTransfers() {
   if (wdp) wdp.onclick = () => {
     if (!actGuard(wdActor(), 'window draft')) return;
     if (netOn()) {
-      serverAct('windowDraft', { op: 'pass' })
+      serverAct('windowDraft', { op: 'pass', expectedTurn: state.windowDraft?.turn || 0 })
         .then(() => toast(`${managerName(wdActor())} passes.`)).catch(() => {});
       return;
     }
@@ -3202,7 +3216,7 @@ function bindTransfers() {
     const tgw = transferGw();
     if (!squadShapeOk([...squadAt(actor, tgw).filter(x => x.id !== outId), inP])) { toast('Breaks the squad position limits'); return; }
     if (netOn()) {
-      serverAct('windowDraft', { op: 'pick', inId: inP.id, outId })
+      serverAct('windowDraft', { op: 'pick', inId: inP.id, outId, expectedTurn: state.windowDraft?.turn || 0 })
         .then(() => toast(`${inP.name} signed in the Window Draft. ${PLAYER_BY_ID[outId]?.name} makes way.`))
         .catch(() => {});
       return;

@@ -6,10 +6,14 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "check": "node --check js/app.js && node --check js/engine.js && node --check functions/index.js && node --check scripts/run_waivers.js",
+    "check": "node --check js/app.js && node --check js/engine.js && node --check functions/index.js && node --check functions/feedcheck.js && node --check scripts/run_waivers.js && node --check scripts/deploy.js && node --check scripts/backup_league.js && node --check scripts/restore_league.js",
     "test": "npm run check && npm run test:offline",
-    "test:offline": "node test/sim.test.js && node test/dgw.test.js && node test/engine.parity.test.js",
-    "test:emu": "DATA_BASE_URL=http://127.0.0.1:8126 firebase emulators:exec --config firebase.emu.json --project calciopoli-wc26 'node test/rules.test.js && node test/functions.test.js && node test/migrate.test.js'"
+    "test:offline": "node test/noeval.test.js && node test/feed.test.js && node test/sim.test.js && node test/dgw.test.js && node test/engine.parity.test.js",
+    "test:browser": "node test/authui.smoke.js && node test/offline.ux.test.js",
+    "test:emu": "node -e \"require('fs').copyFileSync('js/engine.js','functions/engine.js')\" && DATA_BASE_URL=http://127.0.0.1:8126 npx firebase-tools emulators:exec --config firebase.emu.json --project calciopoli-wc26 'node test/rules.test.js && node test/functions.test.js && node test/migrate.test.js && node test/backup.test.js && node test/provision.test.js'",
+    "deploy:cutover-rules": "node scripts/deploy.js cutover-rules",
+    "deploy:functions": "node scripts/deploy.js functions",
+    "rollback:legacy-rules": "node scripts/deploy.js legacy-rules"
   },
   "dependencies": {
     "puppeteer-core": "^25.3.0"
