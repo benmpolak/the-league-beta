@@ -15,8 +15,8 @@
   const XI_RULES = { size: 11, GK: [1, 1], DF: [3, 5], MF: [2, 5], FW: [1, 3] };
   const REGULAR_GWS = 33;
   const DEFAULT_SCORING = {
-    appearance: 1,
-    appearance60: 2,
+    appearanceStart: 2,
+    appearanceSub: 1,
     goalGK: 10, goalDF: 6, goalMF: 5, goalFW: 4,
     assist: 3,
     cleanSheet: 4,
@@ -217,14 +217,27 @@
     }
 
     /* ---- scoring kernel ---- */
-    function statPoints(scoring, player, s) {
-      // double gameweek: score per fixture and sum
-      if (s && s.fx && s.fx.length > 1) return s.fx.reduce((t, f) => t + statPoints(scoring, player, f), 0);
+    // Appearance points (Committee ruling, Jul 2026): a START is 2, coming on
+    // as a SUB is 1, no 60-minute threshold. s.st is the number of starts in
+    // the gameweek; per-fixture rows carry minutes only, so in a double
+    // gameweek the appearance points are settled once from the start count +
+    // fixtures actually played (additive, so allocation never matters).
+    function appearancePts(sc, s, played) {
+      const starts = Math.min(s.st || 0, played);
+      return starts * sc.appearanceStart + (played - starts) * sc.appearanceSub;
+    }
+    function statPoints(scoring, player, s, skipAppearance) {
       const sc = scoring;
+      // double gameweek: score per fixture and sum; appearance settled once here
+      if (s && s.fx && s.fx.length > 1) {
+        const played = s.fx.filter(f => (f.min || 0) > 0).length;
+        return appearancePts(sc, s, played)
+          + s.fx.reduce((t, f) => t + statPoints(scoring, player, f, true), 0);
+      }
       const goalPts = { GK: sc.goalGK, DF: sc.goalDF, MF: sc.goalMF, FW: sc.goalFW }[player.pos] ?? sc.goalFW;
       const min = s.min ?? ((s.st || s.sub) ? 90 : 0);
       let pts = 0;
-      if (min > 0) pts += min >= 60 ? sc.appearance60 : sc.appearance;
+      if (!skipAppearance && min > 0) pts += appearancePts(sc, s, 1);
       pts += (s.g || 0) * goalPts + (s.a || 0) * sc.assist;
       pts += (s.og || 0) * sc.ownGoal + (s.pm || 0) * sc.penMiss;
       pts += (s.yc || 0) * sc.yellow + (s.rc || 0) * sc.red;

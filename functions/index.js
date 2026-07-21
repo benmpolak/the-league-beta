@@ -917,6 +917,9 @@ ACTIONS.importState = async ({ league, a, data }) => {
     if (s.settings.scoring != null) {
       if (!isPlainObj(s.settings.scoring)) importError('scoring');
       for (const [k, v] of Object.entries(s.settings.scoring)) {
+        // pre-Jul-2026 exports carry the retired 60-minute appearance keys —
+        // tolerated and dropped, never imported
+        if (k === 'appearance' || k === 'appearance60') { delete s.settings.scoring[k]; continue; }
         if (!(k in Engine.DEFAULT_SCORING) || typeof v !== 'number' || !Number.isFinite(v)) importError(`scoring "${k}"`);
       }
     }

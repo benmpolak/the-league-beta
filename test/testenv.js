@@ -50,7 +50,7 @@ function genTestData() {
   // GW1 stats: everyone in the first half of each position band played and scored a bit
   const gw1stats = {};
   for (const p of players) {
-    if (p.id % 2 === 0) gw1stats[p.id] = { min: 90, g: p.pos === 'FW' ? 1 : 0, a: p.pos === 'MF' ? 1 : 0, cs: p.pos !== 'FW' ? 1 : 0, gc: 0, sv: p.pos === 'GK' ? 4 : 0 };
+    if (p.id % 2 === 0) gw1stats[p.id] = { min: 90, st: 1, g: p.pos === 'FW' ? 1 : 0, a: p.pos === 'MF' ? 1 : 0, cs: p.pos !== 'FW' ? 1 : 0, gc: 0, sv: p.pos === 'GK' ? 4 : 0 };
   }
   const dir = path.join(ROOT, 'test', 'fixtures', 'testdata');
   fs.mkdirSync(path.join(dir, 'js'), { recursive: true });
@@ -181,7 +181,7 @@ function buildSeedState(players, managerCount = 3) {
       posMax: { GK: 2, DF: 6, MF: 6, FW: 4 },
       pickTimer: 30,
       scoring: {
-        appearance: 1, appearance60: 2, goalGK: 10, goalDF: 6, goalMF: 5, goalFW: 4,
+        appearanceStart: 2, appearanceSub: 1, goalGK: 10, goalDF: 6, goalMF: 5, goalFW: 4,
         assist: 3, cleanSheet: 4, cleanSheetMF: 1, per3Saves: 1, penSave: 5,
         penMiss: -2, yellow: -1, red: -3, ownGoal: -2, per2Conceded: -1,
       },

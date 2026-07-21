@@ -11,19 +11,27 @@ const check = (l, ok, d = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${l}${d
 // real per-fixture data pulled from the FPL API's `explain` for GW26 (a DGW).
 // expected = correct league points under the default table (GK goal 10 / DF 6 /
 // MF 5 / FW 4, assist 3, CS 4/4/1/0, -1 per 2 conceded GK/DF, saves per 3,
-// yellow -1, appearance 1 / 2). oldAgg = what the buggy aggregate scoring gave.
+// yellow -1, appearance: START 2 / SUB 1 — the Committee's Jul 2026 ruling,
+// no 60-minute threshold; st = number of starts in the GW).
+// oldAgg = what the buggy aggregate scoring gave.
 const CASES = [
   { name: 'Raya', pos: 'GK', expected: 3, oldAgg: 1,
-    stats: { min: 180, gc: 3, sv: 2, fx: [{ min: 90 }, { min: 90, gc: 2 }] } },
+    stats: { min: 180, st: 2, gc: 3, sv: 2, fx: [{ min: 90 }, { min: 90, gc: 2 }] } },
   { name: 'Gabriel', pos: 'DF', expected: 5, oldAgg: 3,
-    stats: { min: 180, a: 1, gc: 3, yc: 1, fx: [{ min: 90, yc: 1 }, { min: 90, a: 1, gc: 2 }] } },
+    stats: { min: 180, st: 2, a: 1, gc: 3, yc: 1, fx: [{ min: 90, yc: 1 }, { min: 90, a: 1, gc: 2 }] } },
   { name: 'Saka', pos: 'MF', expected: 8, oldAgg: 7,
-    stats: { min: 92, g: 1, gc: 2, fx: [{ min: 20 }, { min: 72, g: 1 }] } },
+    stats: { min: 92, st: 1, g: 1, gc: 2, fx: [{ min: 20 }, { min: 72, g: 1 }] } },
   { name: 'Gyokeres', pos: 'FW', expected: 3, oldAgg: 1,
-    stats: { min: 154, yc: 1, fx: [{ min: 90, yc: 1 }, { min: 64 }] } },
+    stats: { min: 154, st: 2, yc: 1, fx: [{ min: 90, yc: 1 }, { min: 64 }] } },
 ];
 // an ordinary single-fixture defender who kept a clean sheet — must be unchanged
-const SINGLE = { name: 'single-GW DF', pos: 'DF', expected: 6, stats: { min: 90, cs: 1 } };
+const SINGLE = { name: 'single-GW DF', pos: 'DF', expected: 6, stats: { min: 90, st: 1, cs: 1 } };
+// the Committee's rule, pinned: a 30-minute STARTER earns the full 2 (the old
+// 60-minute rule paid 1); a 70-minute SUB earns 1 (the old rule paid 2)
+const START_RULE = [
+  { name: 'starter hooked at 30 min gets 2', pos: 'MF', expected: 2, stats: { min: 30, st: 1 } },
+  { name: '70-minute sub gets 1', pos: 'MF', expected: 1, stats: { min: 70, st: 0, sub: 1 } },
+];
 
 (async () => {
   const browser = await puppeteer.launch({
@@ -51,6 +59,11 @@ const SINGLE = { name: 'single-GW DF', pos: 'DF', expected: 6, stats: { min: 90,
 
   const s = await p.evaluate(c => statPoints({ pos: c.pos }, c.stats), SINGLE);
   check('single-fixture scoring unchanged (no fx field)', s === SINGLE.expected, `got ${s}`);
+
+  for (const c of START_RULE) {
+    const r = await p.evaluate(c => statPoints({ pos: c.pos }, c.stats), c);
+    check(c.name, r === c.expected, `got ${r}`);
+  }
 
   check('zero page errors', errs.length === 0, errs.slice(0, 2).join(' | '));
   await browser.close();
