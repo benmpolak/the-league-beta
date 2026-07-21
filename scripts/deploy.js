@@ -36,6 +36,15 @@ const MODES = {
     warning: 'This redeploys the LEGACY rules — the open, trust-the-browser world. Only do\n'
       + 'this as step 1 of the rollback procedure in MIGRATION-RUNBOOK.md.',
   },
+  'staging-rules': {
+    config: 'firebase.staging.json',
+    rules: 'database.rules.staging.json',
+    only: 'database',
+    confirm: 'STAGE',
+    warning: 'PRE-CUTOVER staging: legacy rules stay exactly as they are (nothing freezes,\n'
+      + 'old client unaffected) and the v2 subtree becomes readable per the final model,\n'
+      + 'so the authenticated client can be rehearsed against the live project.',
+  },
   functions: {
     config: 'firebase.json',
     rules: null,

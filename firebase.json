@@ -2,7 +2,7 @@
   "_comment": "No database rules here ON PURPOSE: a bare `deploy --only database` must fail rather than silently pick a rules file. Rules deploy only through `npm run deploy:cutover-rules` / `npm run rollback:legacy-rules` (scripts/deploy.js), which name their config explicitly.",
   "functions": {
     "source": "functions",
-    "predeploy": ["node -e \"require('fs').copyFileSync('js/engine.js','functions/engine.js')\""]
+    "predeploy": ["node scripts/copy_engine.js"]
   },
   "emulators": {
     "auth": { "port": 9099 },

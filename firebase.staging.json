@@ -1,0 +1,6 @@
+{
+  "_comment": "PRE-CUTOVER STAGING config: deploys database.rules.staging.json — the live legacy rules UNCHANGED plus the v2 read grants, so the authenticated client can be rehearsed against the live project. Nothing freezes; the legacy world keeps working. Use only via `npm run deploy:staging-rules`.",
+  "database": {
+    "rules": "database.rules.staging.json"
+  }
+}
