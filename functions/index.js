@@ -30,7 +30,12 @@ const Engine = require('./engine.js');
 const Feed = require('./feedcheck.js');
 
 setGlobalOptions({ region: 'europe-west1', maxInstances: 5 });
-admin.initializeApp();
+// explicit databaseURL: the emulator redirects the transport, but the
+// NAMESPACE comes from this URL — leaving it implicit made the emulated
+// functions read a different (empty) database depending on tooling version
+admin.initializeApp({
+  databaseURL: 'https://calciopoli-wc26-default-rtdb.europe-west1.firebasedatabase.app',
+});
 
 const LEAGUES = ['the-league-2627', 'the-league-sandbox'];
 const CUP_START = 7;
