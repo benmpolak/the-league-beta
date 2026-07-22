@@ -13,13 +13,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="The League">
-<script>
-// the-league-beta is the lads' pre-season test site: it plays ONLY in the
-// sandbox league. Inert on every other host/path.
-if (location.pathname.includes('the-league-beta') && !location.search.includes('sandbox')) {
-  location.replace(location.pathname + '?sandbox' + location.hash);
-}
-</script>
+<script src="js/hostguard.js"></script>
 <link rel="preconnect" href="https://resources.premierleague.com">
 <link rel="preconnect" href="https://fantasy.premierleague.com">
 <link rel="stylesheet" href="css/style.css">
