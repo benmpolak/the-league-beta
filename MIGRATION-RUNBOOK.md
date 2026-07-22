@@ -68,6 +68,11 @@ membership on every call.
 
 ## 4. Sandbox rehearsal (live project, fake league)
 
+Clients can only READ the v2 subtree once its rules exist. Pre-cutover that is
+done WITHOUT freezing anything: `npm run deploy:staging-rules` deploys the
+live legacy rules verbatim plus the v2 read grants (type `STAGE`). This was
+first done 22 Jul 2026; re-run it only if the legacy rules have changed since.
+
 The sandbox league lets you rehearse the full authenticated experience without
 touching the real league:
 
@@ -128,7 +133,10 @@ There is no maintenance flag on the old world — the rules deploy IS the freeze
    The report must end `RESULT: PASS`, `checksums: MATCH`. Keep
    `data/migration-report.txt` with the cutover commit. Idempotent — a flaky
    connection mid-write is fixed by running it again.
-5. Deploy the functions (if not already at the current build):
+5. Deploy the functions at the current build — and FIRST delete the
+   `DATA_BASE_URL` line from `functions/.env` (pre-cutover it points at the
+   auth-v2 branch feed; post-merge the Pages feed is the fresh one and the
+   override would silently pin the server to a stale branch):
    ```
    npm run deploy:functions
    ```
