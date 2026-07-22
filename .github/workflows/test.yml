@@ -52,4 +52,4 @@ jobs:
           # functions fetch reference data from here; the suites generate and
           # serve the synthetic players/gameweeks feed on this port themselves
           DATA_BASE_URL: http://127.0.0.1:8126
-        run: npx firebase-tools emulators:exec --config firebase.emu.json --project calciopoli-wc26 "node test/rules.test.js && node test/functions.test.js && node test/migrate.test.js && node test/backup.test.js && node test/provision.test.js"
+        run: npx firebase-tools emulators:exec --config firebase.emu.json --project calciopoli-wc26 "node test/rules.test.js && node test/functions.test.js && node test/migrate.test.js && node test/backup.test.js && node test/provision.test.js && node test/emaillink.test.js"

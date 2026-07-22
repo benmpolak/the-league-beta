@@ -1,8 +1,13 @@
 # Sign-in Link Delivery Fallback — Design (NOT IMPLEMENTED)
 
-Status: **design only**, approved direction 22 Jul 2026. Do not build until the
-Chairman says so. Prerequisite decisions still open: Resend account + sending
-domain purchase.
+Status: **BUILT 22 Jul 2026** ("build it" — Ben). Implemented as
+`requestSignInLink` in functions/index.js, tested by test/emaillink.test.js
+(18 checks: membership gate, enumeration resistance, email+IP throttling,
+idempotency, provider failure/retries, delivered-link completion).
+Provider: **Brevo** free tier with single verified sender (no domain purchased
+— not authorised; the Resend+domain upgrade below remains the documented path
+if deliverability disappoints). Go-live needs Ben: Brevo signup + sender
+verification + API key into Secret Manager, then a functions deploy.
 
 ## Problem
 

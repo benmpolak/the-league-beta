@@ -7,7 +7,7 @@ import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/fireba
 import { getDatabase, ref, onValue, connectDatabaseEmulator } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js';
 import {
   getAuth, connectAuthEmulator, onAuthStateChanged, signOut,
-  sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink,
+  isSignInWithEmailLink, signInWithEmailLink,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import { getFunctions, connectFunctionsEmulator, httpsCallable } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js';
 
@@ -46,7 +46,11 @@ window.WCSync = {
   auth: {
     user: () => auth.currentUser,
     async sendLink(email) {
-      await sendSignInLinkToEmail(auth, email, { url: location.origin + location.pathname + location.search, handleCodeInApp: true });
+      // Firebase's default mail relay never delivers for this project, so the
+      // server generates the link and emails it itself (requestSignInLink —
+      // see EMAIL-FALLBACK-DESIGN.md). Same link format, same completion flow.
+      const requestFn = httpsCallable(functions, 'requestSignInLink');
+      await requestFn({ league: LEAGUE, email, idempotencyKey: crypto.randomUUID() });
       localStorage.setItem(EMAIL_KEY, email);
     },
     // completes a magic-link visit; returns true if this page load was one

@@ -962,6 +962,119 @@ ACTIONS.importState = async ({ league, a, data }) => {
   return { ok: true };
 };
 
+/* ---------------- sign-in link delivery (EMAIL-FALLBACK-DESIGN.md) ----------------
+ * Firebase's default mail relay never delivers for this project, so the server
+ * generates the standard sign-in link and emails it itself. UNAUTHENTICATED by
+ * necessity (nobody has an identity before signing in), so it trusts nothing:
+ * the email is normalised and looked up, the uid must hold CURRENT membership,
+ * and every path — member, unknown, revoked, throttled, duplicate, provider
+ * failure — returns the same generic response on the same timing floor. The
+ * response never reveals whether an address is registered. */
+const MAIL_API = process.env.MAIL_API_URL || 'https://api.brevo.com/v3/smtp/email';
+const MAIL_SENDER = process.env.MAIL_SENDER || 'benmpolak@googlemail.com';
+const GENERIC = { ok: true, message: 'If that address belongs to a manager, a sign-in link is on its way.' };
+const RESPONSE_FLOOR_MS = 900;
+const sha256 = s => require('crypto').createHash('sha256').update(s).digest('hex');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function normaliseEmail(raw) {
+  if (typeof raw !== 'string') return null;
+  const e = raw.normalize('NFC').trim().toLowerCase();
+  if (e.length > 254 || !/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(e)) return null;
+  return e;
+}
+/* sliding-window limiter on hashed buckets — the store never holds an address
+ * or an IP, only sha256 hashes and timestamps (self-pruning at 24h) */
+async function overLimit(kind, hash, windows) {
+  const ref = db().ref(`v2/mailGuard/${kind}/${hash}`);
+  let over = false;
+  const res = await ref.transaction(cur => {
+    const now = Date.now();
+    const arr = toArr(cur).filter(t => typeof t === 'number' && now - t < 24 * 3600e3);
+    over = windows.some(w => arr.filter(t => now - t < w.ms).length >= w.max);
+    if (over) return; // abort: no write needed
+    arr.push(now);
+    return arr.slice(-60);
+  });
+  void res; // outcome is carried by `over`, decided on the txn's final attempt
+  return over;
+}
+// duplicate suppression: first caller of an idempotency key within 10 min wins
+async function idemFresh(idemHash) {
+  const res = await db().ref(`v2/mailGuard/idem/${idemHash}`).transaction(cur =>
+    (cur && Date.now() - cur < 10 * 60e3) ? undefined : Date.now());
+  return res.committed;
+}
+async function deliverLink(email, link) {
+  const key = process.env.BREVO_API_KEY;
+  if (!key) throw new Error('mail api key not configured');
+  const payload = {
+    sender: { name: 'The League', email: MAIL_SENDER },
+    to: [{ email }],
+    subject: 'Your sign-in link for The League',
+    textContent: 'Sign in to The League:\n\n' + link + '\n\nThe link is single-use and only works for this email address. If you didn’t ask for it, ignore this.\n\n— The Committee',
+    htmlContent: '<p>Sign in to The League:</p><p><a href="' + link + '">Open The League</a></p><p style="color:#666">The link is single-use and only works for this email address. If you didn’t ask for it, ignore this.</p><p>— The Committee</p>',
+  };
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await fetch(MAIL_API, {
+        method: 'POST',
+        headers: { 'api-key': key, 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (r.ok) return (await r.json().catch(() => ({}))).messageId || 'sent';
+      lastErr = new Error('mail api ' + r.status);
+    } catch (e) { lastErr = e; }
+    if (attempt < 2) await sleep(300 + Math.floor(Math.random() * 400));
+  }
+  throw lastErr;
+}
+
+exports.requestSignInLink = onCall({
+  secrets: ['BREVO_API_KEY'],
+  enforceAppCheck: process.env.ENFORCE_APPCHECK === 'true', // flip at the App Check step
+}, async req => {
+  const t0 = Date.now();
+  // single exit: every outcome converges here onto the same response + floor
+  const finish = async (outcome, extra = {}) => {
+    console.log(JSON.stringify({ evt: 'signin_link', out: outcome, ...extra })); // hashes only, never addresses/links/IPs
+    await sleep(Math.max(0, RESPONSE_FLOOR_MS - (Date.now() - t0)));
+    return { ...GENERIC };
+  };
+  try {
+    const { league } = req.data || {};
+    if (!LEAGUES.includes(league)) return finish('suppressed', { why: 'league' });
+    const email = normaliseEmail((req.data || {}).email);
+    if (!email) return finish('suppressed', { why: 'shape' });
+    const eh = sha256(email);
+    const idemRaw = String((req.data || {}).idempotencyKey || '');
+    const idemHash = idemRaw ? sha256(idemRaw) : null;
+    const ip = req.rawRequest?.ip || req.rawRequest?.headers?.['x-forwarded-for'] || 'unknown';
+    const ih = sha256(String(ip));
+    if (await overLimit('email', eh, [{ ms: 15 * 60e3, max: 3 }, { ms: 24 * 3600e3, max: 10 }])) return finish('limited', { eh: eh.slice(0, 8) });
+    if (await overLimit('ip', ih, [{ ms: 15 * 60e3, max: 10 }])) return finish('limited', { ih: ih.slice(0, 8) });
+    if (idemHash && !(await idemFresh(idemHash))) return finish('duplicate', { idem: idemHash.slice(0, 8) });
+    let uid = null;
+    try { uid = (await admin.auth().getUserByEmail(email)).uid; } catch { /* unknown address */ }
+    if (!uid) return finish('suppressed', { eh: eh.slice(0, 8) });
+    const m = (await db().ref(`${leagueBase(league)}/server/membership/${uid}`).get()).val();
+    if (!m || !Number.isInteger(m.managerId)) return finish('suppressed', { eh: eh.slice(0, 8) });
+    const link = await admin.auth().generateSignInWithEmailLink(email, {
+      url: `https://benmpolak.github.io/the-league${league.endsWith('sandbox') ? '-beta/?sandbox' : '/'}`,
+      handleCodeInApp: true,
+    });
+    try {
+      const mid = await deliverLink(email, link);
+      return finish('sent', { eh: eh.slice(0, 8), rid: String(mid).slice(0, 24) });
+    } catch (e) {
+      return finish('provider_error', { eh: eh.slice(0, 8), err: String(e.message || e).slice(0, 60) });
+    }
+  } catch (e) {
+    return finish('provider_error', { err: String(e.message || e).slice(0, 60) });
+  }
+});
+
 /* ---------------- entry points ---------------- */
 exports.ping = onCall(req => ({ ok: true, uid: req.auth?.uid || null }));
 
