@@ -4,10 +4,11 @@ Status: **BUILT 22 Jul 2026** ("build it" — Ben). Implemented as
 `requestSignInLink` in functions/index.js, tested by test/emaillink.test.js
 (18 checks: membership gate, enumeration resistance, email+IP throttling,
 idempotency, provider failure/retries, delivered-link completion).
-Provider: **Brevo** free tier with single verified sender (no domain purchased
-— not authorised; the Resend+domain upgrade below remains the documented path
-if deliverability disappoints). Go-live needs Ben: Brevo signup + sender
-verification + API key into Secret Manager, then a functions deploy.
+Provider: **Gmail SMTP with an app password** (23 Jul — Brevo signup failed for
+Ben; Gmail needs no new account and delivers its own mail reliably; ~500/day
+limit is 10x headroom). Secret: GMAIL_APP_PASSWORD in Secret Manager. The
+Resend+domain upgrade below remains the documented path if ever needed.
+Go-live needs Ben: app password + secret set + functions deploy.
 
 ## Problem
 

@@ -970,7 +970,7 @@ ACTIONS.importState = async ({ league, a, data }) => {
  * and every path — member, unknown, revoked, throttled, duplicate, provider
  * failure — returns the same generic response on the same timing floor. The
  * response never reveals whether an address is registered. */
-const MAIL_API = process.env.MAIL_API_URL || 'https://api.brevo.com/v3/smtp/email';
+const MAIL_API = process.env.MAIL_API_URL || 'smtp'; // 'smtp' = Gmail; a URL = the emulator test stub
 const MAIL_SENDER = process.env.MAIL_SENDER || 'benmpolak@googlemail.com';
 const GENERIC = { ok: true, message: 'If that address belongs to a manager, a sign-in link is on its way.' };
 const RESPONSE_FLOOR_MS = 900;
@@ -1005,34 +1005,50 @@ async function idemFresh(idemHash) {
     (cur && Date.now() - cur < 10 * 60e3) ? undefined : Date.now());
   return res.committed;
 }
+const MAIL_TEXT = link => 'Sign in to The League:\n\n' + link + '\n\nThe link is single-use and only works for this email address. If you didn’t ask for it, ignore this.\n\n— The Committee';
+const MAIL_HTML = link => '<p>Sign in to The League:</p><p><a href="' + link + '">Open The League</a></p><p style="color:#666">The link is single-use and only works for this email address. If you didn’t ask for it, ignore this.</p><p>— The Committee</p>';
+
+/* Delivery: Gmail SMTP with an app password (no third-party account needed —
+ * the league writes from the Chairman's own address). The emulator suites set
+ * MAIL_API_URL and exercise the guard logic through an HTTP stub instead; the
+ * SMTP leg itself is verified live after deploy. */
 async function deliverLink(email, link) {
-  const key = process.env.BREVO_API_KEY;
-  if (!key) throw new Error('mail api key not configured');
-  const payload = {
-    sender: { name: 'The League', email: MAIL_SENDER },
-    to: [{ email }],
+  if (MAIL_API !== 'smtp') { // test stub path (emulator only)
+    const r = await fetch(MAIL_API, {
+      method: 'POST',
+      headers: { 'api-key': process.env.GMAIL_APP_PASSWORD || '', 'content-type': 'application/json' },
+      body: JSON.stringify({ sender: { email: MAIL_SENDER }, to: [{ email }], subject: 'Your sign-in link for The League', textContent: MAIL_TEXT(link), htmlContent: MAIL_HTML(link) }),
+    });
+    if (!r.ok) throw new Error('mail api ' + r.status);
+    return (await r.json().catch(() => ({}))).messageId || 'sent';
+  }
+  const pass = process.env.GMAIL_APP_PASSWORD;
+  if (!pass) throw new Error('mail credential not configured');
+  const nodemailer = require('nodemailer');
+  const transport = nodemailer.createTransport({
+    host: 'smtp.gmail.com', port: 465, secure: true,
+    auth: { user: MAIL_SENDER, pass },
+  });
+  const info = await transport.sendMail({
+    from: `"The League" <${MAIL_SENDER}>`,
+    to: email,
     subject: 'Your sign-in link for The League',
-    textContent: 'Sign in to The League:\n\n' + link + '\n\nThe link is single-use and only works for this email address. If you didn’t ask for it, ignore this.\n\n— The Committee',
-    htmlContent: '<p>Sign in to The League:</p><p><a href="' + link + '">Open The League</a></p><p style="color:#666">The link is single-use and only works for this email address. If you didn’t ask for it, ignore this.</p><p>— The Committee</p>',
-  };
+    text: MAIL_TEXT(link),
+    html: MAIL_HTML(link),
+  });
+  return info.messageId || 'sent';
+}
+async function deliverWithRetries(email, link) {
   let lastErr = null;
   for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const r = await fetch(MAIL_API, {
-        method: 'POST',
-        headers: { 'api-key': key, 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (r.ok) return (await r.json().catch(() => ({}))).messageId || 'sent';
-      lastErr = new Error('mail api ' + r.status);
-    } catch (e) { lastErr = e; }
+    try { return await deliverLink(email, link); } catch (e) { lastErr = e; }
     if (attempt < 2) await sleep(300 + Math.floor(Math.random() * 400));
   }
   throw lastErr;
 }
 
 exports.requestSignInLink = onCall({
-  secrets: ['BREVO_API_KEY'],
+  secrets: ['GMAIL_APP_PASSWORD'],
   enforceAppCheck: process.env.ENFORCE_APPCHECK === 'true', // flip at the App Check step
 }, async req => {
   const t0 = Date.now();
@@ -1065,7 +1081,7 @@ exports.requestSignInLink = onCall({
       handleCodeInApp: true,
     });
     try {
-      const mid = await deliverLink(email, link);
+      const mid = await deliverWithRetries(email, link);
       return finish('sent', { eh: eh.slice(0, 8), rid: String(mid).slice(0, 24) });
     } catch (e) {
       return finish('provider_error', { eh: eh.slice(0, 8), err: String(e.message || e).slice(0, 60) });
