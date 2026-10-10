@@ -281,7 +281,49 @@ def main():
                     fx.append(fs)
                 row['fx'] = fx
             stats[el['id']] = row
+            # xG, xA and xGC per gameweek (Marc, 10 Oct 2026: "i want to see if
+            # a players high xg is in one game or many, is recent, or was ages
+            # ago"). The feed only ever gave a season-to-date total, so a window
+            # over it showed the same number whatever you asked for.
+            #
+            # Take them off the live response when it carries them — those are
+            # per-round figures that re-read correctly if FPL revises a score
+            # later. The endpoint has not always had them, so nothing here
+            # assumes it does: an absent field is left absent and the preserve
+            # pass below keeps whatever was already reconstructed.
+            for key, field in (('xg', 'expected_goals'), ('xa', 'expected_assists'),
+                               ('xgc', 'expected_goals_conceded')):
+                if field in s:
+                    try:
+                        v = round(float(s[field] or 0), 2)
+                    except (TypeError, ValueError):
+                        continue
+                    if v > 0:
+                        row[key] = v
         gws[str(ev['id'])] = {'finished': ev['finished'], 'stats': stats}
+
+    # Keep per-gameweek xG that this run could not produce itself.
+    #
+    # This file is rebuilt from scratch every few minutes. Rounds 1-5 of 26/27
+    # were played before anything stored xG per round, so they were rebuilt off
+    # this repo's own history by scripts/backfill_xg.js — and without this pass
+    # the very next refresh would throw that away again. Only ever fills a gap:
+    # a figure the live response gave us above always wins.
+    try:
+        old = json.loads((ROOT / 'data' / 'stats.json').read_text(encoding='utf-8'))
+        for gw_key, old_gw in (old.get('gws') or {}).items():
+            new_gw = gws.get(gw_key)
+            if not new_gw:
+                continue
+            for pid, old_row in (old_gw.get('stats') or {}).items():
+                new_row = new_gw['stats'].get(int(pid)) or new_gw['stats'].get(pid)
+                if not new_row:
+                    continue
+                for key in ('xg', 'xa', 'xgc'):
+                    if key in old_row and key not in new_row:
+                        new_row[key] = old_row[key]
+    except (OSError, ValueError):
+        pass        # no previous file, or it is unreadable: nothing to preserve
 
     (ROOT / 'data' / 'stats.json').write_text(json.dumps({
         'generated': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
